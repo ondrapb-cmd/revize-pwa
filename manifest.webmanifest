@@ -1,0 +1,17 @@
+{
+  "name": "Revize – terénní checklist",
+  "short_name": "Revize",
+  "description": "Checklist požární revize CL-A4-02 pro iPhone, funguje i offline.",
+  "lang": "cs",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f3f5f9",
+  "theme_color": "#16263e",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
