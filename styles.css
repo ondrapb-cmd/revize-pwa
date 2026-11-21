@@ -70,3 +70,13 @@ a { color: var(--accent); }
 #toast { position: fixed; left: 12px; right: 12px; bottom: calc(env(safe-area-inset-bottom) + 76px); max-width: 600px; margin: 0 auto;
   background: #16263e; color: #fff; border-radius: 12px; padding: 12px 14px; z-index: 9; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
 .req::after { content: ' *'; color: var(--danger); }
+.row.nowrap { flex-wrap: nowrap; }
+.obj { cursor: pointer; }
+/* Červené odebrání u názvu objektu / checklistu – velký dotykový cíl, malý symbol */
+.xbtn { flex: 0 0 auto; width: 36px; height: 36px; margin: -6px -4px -6px 0; border-radius: 10px; border: 1px solid var(--danger);
+  background: transparent; color: var(--danger); font-size: 17px; font-weight: 700; line-height: 1; display: grid; place-items: center; cursor: pointer; }
+.xbtn:active { background: var(--danger); color: #fff; }
+.seg.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.seg.five button { font-size: 13px; padding: 0 2px; }
+.card.dim, .item.dim { opacity: .6; }
+.item.picked { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }

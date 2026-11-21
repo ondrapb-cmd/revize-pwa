@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const ROLES = [
   ['po', 'A – Preventivní prohlídka PO'], ['php', 'B – Hasicí přístroje'], ['hydranty', 'B2 – Hydranty'],
   ['pozarni_dvere', 'C – Požární uzávěry'], ['nouzove_osvetleni', 'C – Nouzové osvětlení'], ['ucpavky', 'C – Ucpávky'],
@@ -32,6 +32,10 @@ const store = {
 };
 let seznam = store.get('revize.seznam', { vytvoreno: '', polozky: [] });
 let drafts = store.get('revize.koncepty', {});
+// Objekty odebrané ze seznamu (vyřízené jinak než telefonem): id → termín v době odebrání.
+// Při novém termínu (další rok) se objekt v seznamu znovu objeví.
+let skryte = store.get('revize.skryte', {});
+function isHidden(o) { return Object.prototype.hasOwnProperty.call(skryte, o.id) && skryte[o.id] === (o.termin || ''); }
 let saveTimer = null;
 function saveDrafts(now) {
   clearTimeout(saveTimer);
@@ -86,6 +90,18 @@ function phoneHref(phone) {
   return digits.replace(/\D/g, '').length >= 9 ? 'tel:' + digits.split(/[;/,]/)[0] : null;
 }
 function yearOf(draft) { return Number((draft.datum || todayIso()).slice(0, 4)); }
+const NEW_SERIAL = /^[^/\s]+\/\d{2}$/;  // PC čte rok výroby nového PHP z „/XX“
+function inventoryOf(draft) {
+  if (draft.novy_objekt === true || !draft.zdroj) return null;
+  const current = seznam.polozky.find(o => o.id === draft.zdroj.id);
+  const php = (current && current.php) || draft.zdroj.php;
+  return php && Array.isArray(php.pristroje) && php.pristroje.length ? php : null;
+}
+function kindOf(text) {
+  const n = norm(text);
+  if (n.startsWith('sn') || n.startsWith('co')) return 'Sněhový (CO₂)';
+  return DRUHY.find(d => norm(d).slice(0, 3) === n.slice(0, 3)) || '';
+}
 
 /* ------------------------------------------------------------------ model checklistu */
 function newDraft(source) {
@@ -136,9 +152,17 @@ function validate(draft) {
   if (draft.hyd_mereni.length && draft.stavy.hydranty === 'netyka_se') errors.push('Hydranty: měření nelze uložit u stavu Netýká se.');
   draft.po.zavady.forEach((z, i) => { if (!z.popis.trim()) errors.push(`A – závada ${i + 1}: chybí popis.`); });
   const serials = new Set();
+  const inv = inventoryOf(draft);
+  const known = new Set((inv ? inv.pristroje : []).map(u => u.vyrobni_cislo.trim().toLowerCase()));
   draft.php.forEach((row, i) => {
-    const label = `B – ${PHP_ACTIONS[row.akce]} ${i + 1}`;
+    const label = `B – ${PHP_ACTIONS[row.akce]} ${row.vyrobni_cislo.trim() || i + 1}`;
     if (!row.vyrobni_cislo.trim()) errors.push(`${label}: chybí výrobní číslo.`);
+    const serialKey = row.vyrobni_cislo.trim().toLowerCase();
+    if (inv && serialKey && ['TZ', 'OPR', 'VYR', 'VYM'].includes(row.akce) && !known.has(serialKey)) errors.push(`${label}: přístroj není v evidenci objektu – vyber ho v seznamu přístrojů.`);
+    if (inv && serialKey && row.akce === 'NOVY' && known.has(serialKey)) errors.push(`${label}: toto výrobní číslo už v evidenci je.`);
+    const newSerial = row.akce === 'VYM' ? row.nove_vyrobni_cislo.trim() : row.akce === 'NOVY' ? row.vyrobni_cislo.trim() : '';
+    if (newSerial && !NEW_SERIAL.test(newSerial)) errors.push(`${label}: výrobní číslo nového PHP piš ve tvaru číslo/XX (např. 001234/26).`);
+    if (newSerial && known.has(newSerial.toLowerCase())) errors.push(`${label}: nové výrobní číslo ${newSerial} už v evidenci je.`);
     const key = row.vyrobni_cislo.trim().toLowerCase();
     if (key && row.akce !== 'EVIDENCE') { if (serials.has(key)) errors.push(`${label}: více akcí pro stejné výrobní číslo.`); serials.add(key); }
     if (row.akce === 'EVIDENCE' && draft.novy_objekt !== true) errors.push(`${label}: evidence stávajících PHP je jen u nového objektu.`);
@@ -264,9 +288,11 @@ function renderList() {
   const open = Object.values(drafts).sort((a, b) => b.zmeneno.localeCompare(a.zmeneno));
   if (open.length) {
     app.append(h('h2', { class: 'muted', style: 'margin:4px 4px 8px;font-size:15px' }, 'ROZPRACOVANÉ A ULOŽENÉ CHECKLISTY'));
-    for (const draft of open.slice(0, 20)) {
-      app.append(h('button', { class: 'obj', type: 'button', onclick: () => { location.hash = '#/c/' + encodeURIComponent(draft.id); } },
-        h('div', { class: 'row' }, h('span', { class: 't grow' }, draft.adresa || '(bez adresy)'), draftBadge(draft)),
+    for (const draft of open.slice(0, 30)) {
+      const go = () => { location.hash = '#/c/' + encodeURIComponent(draft.id); };
+      app.append(h('div', { class: 'obj', role: 'button', tabindex: '0', onclick: go },
+        h('div', { class: 'row nowrap' }, h('span', { class: 't grow' }, draft.adresa || '(bez adresy)'), draftBadge(draft),
+          xButton(`Smazat checklist ${draft.adresa || '(bez adresy)'}`, () => deleteDraft(draft))),
         h('div', { class: 'muted' }, `${czDate(draft.datum)} · ${draft.subjekt || 'vlastník nevyplněn'}`)));
     }
   }
@@ -283,9 +309,12 @@ function renderList() {
         : 'Seznam zatím není načtený. V programu na PC: Lhůtník → Export pro telefon, soubor ulož do OneDrive a tady ho načti.')),
     listBox);
 
+  const showHidden = sessionStorage.getItem('revize.skryte') === '1';
   function fill() {
     const q = norm(query);
+    const hiddenCount = seznam.polozky.filter(isHidden).length;
     const items = seznam.polozky.filter(o => {
+      if (isHidden(o) !== showHidden) return false;
       const v = monthValue(o.termin);
       if (filter === 'tento' && v !== current) return false;
       if (filter === 'pristi' && v !== current + 1) return false;
@@ -295,16 +324,34 @@ function renderList() {
     listBox.replaceChildren(...items.slice(0, 300).map(o => {
       const draft = drafts['obj:' + o.id];
       const tel = phoneHref(o.telefon);
-      return h('div', { class: 'card' },
-        h('div', { class: 'row' }, h('div', { class: 't grow', style: 'font-weight:650' }, o.adresa), draftBadge(draft)),
-        h('div', { class: 'muted' }, `${o.zkratka || o.zakaznik} · ${o.sada || ''} · termín ${o.termin || '—'}`),
+      const phpCount = o.php && o.php.pristroje ? o.php.pristroje.length : 0;
+      return h('div', { class: 'card' + (showHidden ? ' dim' : '') },
+        h('div', { class: 'row nowrap' }, h('div', { class: 't grow', style: 'font-weight:650' }, o.adresa), draftBadge(draft),
+          showHidden ? null : xButton(`Odebrat ${o.adresa} ze seznamu`, () => hideObject(o))),
+        h('div', { class: 'muted' }, `${o.zkratka || o.zakaznik} · ${o.sada || ''} · termín ${o.termin || '—'}${phpCount ? ` · ${phpCount} PHP` : ''}`),
         (o.osoba || o.telefon) ? h('div', { class: 'muted' }, [o.osoba, o.telefon].filter(Boolean).join(' · ')) : null,
         h('div', { class: 'row', style: 'margin-top:8px' },
-          h('button', { class: 'btn primary grow', type: 'button', onclick: () => openDraft(o) }, draft ? 'Pokračovat v checklistu' : 'Nový checklist'),
+          showHidden
+            ? h('button', { class: 'btn grow', type: 'button', onclick: () => { delete skryte[o.id]; store.set('revize.skryte', skryte); fill(); } }, 'Vrátit do seznamu')
+            : h('button', { class: 'btn primary grow', type: 'button', onclick: () => openDraft(o) }, draft ? 'Pokračovat v checklistu' : 'Nový checklist'),
           tel ? h('a', { class: 'btn', href: tel }, 'Volat') : null));
     }));
-    if (!items.length && seznam.polozky.length) listBox.append(h('p', { class: 'muted' }, 'Nic neodpovídá filtru.'));
+    if (!items.length && seznam.polozky.length) listBox.append(h('p', { class: 'muted' }, showHidden ? 'Žádné odebrané objekty.' : 'Nic neodpovídá filtru.'));
     if (items.length > 300) listBox.append(h('p', { class: 'muted' }, `Zobrazeno prvních 300 z ${items.length} – upřesni hledání.`));
+    if (hiddenCount || showHidden) {
+      listBox.append(h('p', { class: 'muted', style: 'text-align:center' }, h('a', { href: '#/', onclick: e => {
+        e.preventDefault(); sessionStorage.setItem('revize.skryte', showHidden ? '0' : '1'); renderList(); } },
+        showHidden ? '‹ Zpět na seznam' : `Odebrané objekty (${hiddenCount})`)));
+    }
+  }
+  function hideObject(o) {
+    const draft = drafts['obj:' + o.id];
+    const unsaved = draft && draft.stav !== 'ulozeno';
+    if (!confirm(`Odebrat ${o.adresa} ze seznamu?` + (unsaved ? '\n\nRozpracovaný checklist k objektu se smaže (není uložený do OneDrive).' : draft ? '\n\nUložený checklist se z telefonu smaže.' : '')
+      + '\n\nObjekt najdeš dole v „Odebrané objekty“.')) return;
+    skryte[o.id] = o.termin || ''; store.set('revize.skryte', skryte);
+    if (draft) { delete drafts[draft.id]; saveDrafts(true); }
+    renderList();
   }
   fill();
 
@@ -313,6 +360,16 @@ function renderList() {
     h('button', { class: 'btn primary', type: 'button', onclick: () => openDraft(null) }, '+ Objekt mimo seznam'));
   document.body.append(fab);
   app.append(h('p', { class: 'muted', style: 'text-align:center' }, h('a', { href: '#/o-aplikaci' }, 'O aplikaci a zálohy')));
+}
+
+function xButton(label, onClick) {
+  return h('button', { class: 'xbtn', type: 'button', 'aria-label': label, title: label,
+    onclick: e => { e.stopPropagation(); onClick(); } }, '✕');
+}
+function deleteDraft(draft) {
+  const warn = draft.stav === 'ulozeno' ? '' : '\n\nPOZOR: checklist není uložený do OneDrive – zápis se ztratí.';
+  if (!confirm(`Smazat checklist ${draft.adresa || '(bez adresy)'} z telefonu?${warn}`)) return;
+  delete drafts[draft.id]; saveDrafts(true); renderList();
 }
 
 function openDraft(source) {
@@ -332,7 +389,7 @@ function field(label, obj, key, draft, opts = {}) {
   return h('label', { class: 'field' }, h('span', { class: opts.required ? 'req' : null }, label), input);
 }
 function seg(options, value, onPick, extraClass) {
-  return h('div', { class: 'seg' + (options.length === 2 ? ' two' : ''), role: 'group' },
+  return h('div', { class: 'seg' + (options.length === 2 ? ' two' : options.length === 5 ? ' five' : ''), role: 'group' },
     options.map(([v, t]) => h('button', { type: 'button', 'aria-pressed': String(value === v), class: v === 'zmeny' ? 'on-zmeny' : null,
       onclick: () => onPick(value === v && extraClass === 'toggle' ? null : v) }, t)));
 }
@@ -347,9 +404,9 @@ function removeBtn(onRemove) {
 }
 
 function renderChecklist(draft) {
-  const y = window.scrollY;
   clear(); setTitle(draft.adresa || 'Nový checklist', true);
-  const rerender = () => { touch(draft); renderChecklist(draft); window.scrollTo(0, y); };
+  // Pozice se čte až v okamžiku klepnutí – jinak by stránka odskočila na místo z minulého vykreslení.
+  const rerender = () => { const y = window.scrollY; touch(draft); renderChecklist(draft); window.scrollTo(0, y); };
 
   // Hlavička
   const src = draft.zdroj;
@@ -388,11 +445,17 @@ function renderChecklist(draft) {
   }
 
   // B – PHP
-  if (draft.stavy.php === 'zmeny') {
+  const inv = inventoryOf(draft);
+  if (draft.stavy.php === 'zmeny' || (inv && draft.stavy.php === 'beze_zmen')) {
     const actions = Object.keys(PHP_ACTIONS).filter(a => a !== 'EVIDENCE' || draft.novy_objekt === true);
-    app.append(section(draft, 'php', `B – Hasicí přístroje (${draft.php.length})`, [
+    const linked = new Set(inv ? inv.pristroje.map(u => u.vyrobni_cislo.trim().toLowerCase()) : []);
+    const isLinked = row => !!row.ev && linked.has(row.ev);
+    app.append(section(draft, 'php', `B – Hasicí přístroje (${inv ? inv.pristroje.length + ' v evidenci, ' : ''}${draft.php.length} ${draft.php.length === 1 ? 'změna' : 'změn'})`, [
+      inv ? phpInventory(draft, inv, rerender) : null,
       draft.novy_objekt === true ? h('p', { class: 'muted' }, 'U nového objektu zapiš všechny stávající přístroje jako „Evidence stávajícího“. Servis (TZ, oprava…) zapiš zvlášť.') : null,
+      inv ? h('div', { style: 'font-weight:650;margin:14px 0 2px' }, 'Nové přístroje a další akce') : null,
       draft.php.map((row, i) => {
+        if (isLinked(row)) return null;
         const full = FULL_ROW.includes(row.akce);
         return h('div', { class: 'item' },
           h('div', { class: 'item-head' }, `${i + 1}. ${PHP_ACTIONS[row.akce]}`, removeBtn(() => { draft.php.splice(i, 1); rerender(); })),
@@ -410,8 +473,9 @@ function renderChecklist(draft) {
           (row.akce === 'TZ' || row.akce === 'OPR') ? h('p', { class: 'muted', style: 'margin:4px 0 0' }, `Provedeno v roce kontroly (${yearOf(draft)}).`) : null);
       }),
       h('button', { class: 'btn', type: 'button', onclick: () => {
-        draft.php.push({ akce: draft.novy_objekt === true ? 'EVIDENCE' : 'TZ', vyrobni_cislo: '', nove_vyrobni_cislo: '', druh: '', vyrobce: '', model: '', rok_vyroby: '', rok_tz: '', umisteni: '' });
-        rerender(); } }, '+ Přidat přístroj / akci'),
+        draft.php.push({ akce: draft.novy_objekt === true ? 'EVIDENCE' : inv ? 'NOVY' : 'TZ', vyrobni_cislo: '', nove_vyrobni_cislo: '', druh: '', vyrobce: '', model: '', rok_vyroby: '', rok_tz: '', umisteni: '' });
+        if (draft.stavy.php !== 'zmeny') draft.stavy.php = 'zmeny';
+        rerender(); } }, inv ? '+ Nový přístroj' : '+ Přidat přístroj / akci'),
     ], true));
   }
 
@@ -457,6 +521,50 @@ function renderChecklist(draft) {
     } }, 'Smazat checklist')));
   document.body.append(h('div', { class: 'fab' },
     h('button', { class: 'btn primary', type: 'button', onclick: () => showResult(draft, result) }, 'Zkontrolovat a uložit JSON')));
+}
+
+/* Evidence PHP z protokolu: stejné akce jako v tabulce PHP na PC (TZ, oprava, vyřazení, výměna).
+   „Auto“ = nic nezapisovat, program na PC vyhodnotí stav sám (TZ v termínu, konec životnosti). */
+const AUTO_TEXT = {
+  dobry: u => 'dobrý' + (u.pristi_tz ? ` · TZ ${u.pristi_tz}` : ''),
+  tz: () => 'letos TZ', vyradit: () => 'konec životnosti – vyřadí se', vyrazen: () => 'vyřazen dříve',
+  nejasne: () => 'stav nejasný – ověř na PC',
+};
+function phpInventory(draft, inv, rerender) {
+  const year = yearOf(draft);
+  const box = [h('p', { class: 'muted', style: 'margin:0 0 6px' },
+    `Evidence z protokolu ${inv.posledni_kontrola || ''}. „Auto“ = nic neměň, program na PC stav spočítá sám.`,
+    inv.rok && inv.rok !== year ? h('b', null, ` Automatický stav je spočítán pro rok ${inv.rok}, kontrola je v roce ${year}.`) : null)];
+  for (const unit of inv.pristroje) {
+    const key = unit.vyrobni_cislo.trim().toLowerCase();
+    const index = draft.php.findIndex(r => r.ev === key);
+    const row = index >= 0 ? draft.php[index] : null;
+    const options = unit.auto === 'vyrazen' ? [] : unit.auto === 'vyradit'
+      ? [['', 'Vyřadit'], ['VYM', 'Výměna']]
+      : [['', 'Auto'], ['TZ', 'TZ'], ['OPR', 'Oprava'], ['VYR', 'Vyřadit'], ['VYM', 'Výměna']];
+    const pick = value => {
+      if (index >= 0) draft.php.splice(index, 1);
+      if (value) {
+        draft.php.push({ akce: value, ev: key, vyrobni_cislo: unit.vyrobni_cislo, nove_vyrobni_cislo: '', druh: kindOf(unit.druh),
+          vyrobce: '', model: '', rok_vyroby: '', rok_tz: '', umisteni: unit.umisteni });
+        if (draft.stavy.php !== 'zmeny') draft.stavy.php = 'zmeny';
+      }
+      rerender();
+    };
+    box.push(h('div', { class: 'item' + (unit.auto === 'vyrazen' ? ' dim' : '') + (row ? ' picked' : '') },
+      h('div', { class: 'item-head' }, h('span', null, `${unit.poradi ? unit.poradi + '. ' : ''}${unit.umisteni || '—'}`),
+        h('span', { class: 'badge' + (unit.auto === 'tz' || unit.auto === 'vyradit' ? ' draft' : '') }, (AUTO_TEXT[unit.auto] || AUTO_TEXT.nejasne)(unit))),
+      h('div', { class: 'muted' }, [unit.druh, [unit.vyrobce, unit.model].filter(Boolean).join(' '), 'v.č. ' + unit.vyrobni_cislo].filter(Boolean).join(' · ')),
+      options.length ? h('div', { style: 'margin-top:6px' }, seg(options, row ? row.akce : '', pick)) : null,
+      row && row.akce === 'VYM' ? h('div', { style: 'margin-top:6px' },
+        field('Výrobní číslo nového PHP', row, 'nove_vyrobni_cislo', draft, { required: true, caps: 'none', placeholder: 'číslo/XX, např. 001234/26' }),
+        h('label', { class: 'field' }, h('span', { class: 'req' }, 'Druh'),
+          h('select', { onchange: e => { row.druh = e.target.value; touch(draft); } }, [h('option', { value: '' }, '— vyber —'), ...DRUHY.map(d => h('option', { value: d, selected: d === row.druh }, d))])),
+        h('div', { class: 'grid2' }, field('Výrobce', row, 'vyrobce', draft, { required: true }), field('Model / typ', row, 'model', draft, { required: true })),
+        field('Umístění', row, 'umisteni', draft, { required: true })) : null,
+      (row && (row.akce === 'TZ' || row.akce === 'OPR')) ? h('p', { class: 'muted', style: 'margin:4px 0 0' }, `Provedeno v roce kontroly (${year}).`) : null));
+  }
+  return box;
 }
 
 function showResult(draft, box) {
