@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const ROLES = [
   ['po', 'A – Preventivní prohlídka PO'], ['php', 'B – Hasicí přístroje'], ['hydranty', 'B2 – Hydranty'],
   ['pozarni_dvere', 'C – Požární uzávěry'], ['nouzove_osvetleni', 'C – Nouzové osvětlení'], ['ucpavky', 'C – Ucpávky'],
@@ -19,6 +19,10 @@ const STATES = [['beze_zmen', 'Beze změn'], ['zmeny', 'Změny'], ['netyka_se', 
 const PHP_ACTIONS = { TZ: 'Tlaková zkouška', OPR: 'Oprava', VYR: 'Vyřazení', NOVY: 'Nový přístroj', VYM: 'Výměna', EVIDENCE: 'Evidence stávajícího' };
 const DRUHY = ['Práškový', 'Vodní', 'Pěnový', 'Sněhový (CO₂)', 'Jiný'];
 const FULL_ROW = ['NOVY', 'VYM', 'EVIDENCE'];
+const MEASURE_KEYS = ['tlak_vytok', 'tlak_p1', 'tlak_p2', 'tlak_rozdil', 'prutok'];
+const MEASURE_NAME = { tlak_vytok: 'Tlak na výtoku (MPa)', tlak_p1: 'Tlak P1 (MPa)', tlak_p2: 'Tlak P2 (MPa)', tlak_rozdil: 'Rozdíl P1–P2 (MPa)', prutok: 'Průtok Q (l/s)' };
+const NO_STAVY = ['vyhovuje', 'nefunkční', 'mimo provoz'];
+const VYROKY = ['odpovídá', 'odpovídá s omezením', 'neodpovídá'];
 
 /* ------------------------------------------------------------------ úložiště */
 const store = {
@@ -30,7 +34,50 @@ const store = {
     catch (e) { toast('Uložení v telefonu se nezdařilo: ' + e.message); return false; }
   },
 };
-let seznam = store.get('revize.seznam', { vytvoreno: '', polozky: [] });
+/* Seznam objektů s podklady (PHP, Kontrola PO, hydranty, NO) je velký – ukládá se do IndexedDB
+   (localStorage má v Safari jen ~5 MB). Rozpracované checklisty zůstávají v localStorage. */
+const idb = {
+  db: null,
+  open() {
+    if (this.db) return Promise.resolve(this.db);
+    return new Promise((resolve, reject) => {
+      if (!('indexedDB' in window)) { reject(new Error('IndexedDB není k dispozici')); return; }
+      const req = indexedDB.open('revize', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('kv');
+      req.onsuccess = () => { this.db = req.result; resolve(this.db); };
+      req.onerror = () => reject(req.error);
+    });
+  },
+  async get(key) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const req = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+      req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
+    });
+  },
+  async set(key, value) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(value, key);
+      tx.oncomplete = () => resolve(true); tx.onerror = () => reject(tx.error);
+    });
+  },
+};
+let seznam = { vytvoreno: '', polozky: [], katalog: [] };
+async function loadSeznam() {
+  try {
+    const stored = await idb.get('seznam');
+    const legacy = store.get('revize.seznam', null);
+    if (stored) seznam = stored;
+    else if (legacy) { seznam = legacy; await idb.set('seznam', legacy); }
+    if (legacy) localStorage.removeItem('revize.seznam');  // uvolní místo pro checklisty
+  } catch (e) { seznam = store.get('revize.seznam', seznam); }
+  seznam.katalog = seznam.katalog || [];
+}
+async function saveSeznam() {
+  try { await idb.set('seznam', seznam); return true; }
+  catch (e) { return store.set('revize.seznam', seznam); }
+}
 let drafts = store.get('revize.koncepty', {});
 // Objekty odebrané ze seznamu (vyřízené jinak než telefonem): id → termín v době odebrání.
 // Při novém termínu (další rok) se objekt v seznamu znovu objeví.
@@ -121,16 +168,66 @@ function newDraft(source) {
     stav: 'rozpracovano', zmeneno: new Date().toISOString(),
   };
 }
+/* Úpravy polí protokolů z exportu: null = beze změny (zůstane, co je v dokumentu). */
+function ensureDraft(draft) {
+  draft.po_a = draft.po_a || {};            // název řádku → { volby: [...], text }
+  if (!('po_c' in draft)) draft.po_c = null;
+  if (!('po_d' in draft)) draft.po_d = null;
+  if (!('hyd_zaver' in draft)) draft.hyd_zaver = null;
+  if (!('no_doklad' in draft)) draft.no_doklad = null;
+  draft.no_stavy = draft.no_stavy || {};    // řádek seznamu NO → stav
+  return draft;
+}
+function sourceOf(draft) {
+  return (draft.zdroj && seznam.polozky.find(o => o.id === draft.zdroj.id)) || draft.zdroj || null;
+}
 function touch(draft) { draft.zmeneno = new Date().toISOString(); if (draft.stav === 'ulozeno') draft.stav = 'zmeneno'; drafts[draft.id] = draft; saveDrafts(); }
 
+const sameList = (a, b) => JSON.stringify((a || []).map(x => String(x || '').trim()).filter(Boolean)) === JSON.stringify((b || []).map(x => String(x || '').trim()).filter(Boolean));
+function rowState(row, draft) {
+  const edit = draft.po_a[row.nazev];
+  return { volby: edit ? edit.volby : row.volby.map(v => v[2]), text: edit ? edit.text : row.text };
+}
+function changedRowsA(draft, src) {
+  if (!src || !src.po) return [];
+  const out = [];
+  for (const row of src.po.a) {
+    const edit = draft.po_a[row.nazev];
+    if (!edit) continue;
+    const volby = edit.volby.map((v, i) => (v === row.volby[i][2] ? null : v));
+    const text = row.text !== null && String(edit.text || '').trim() !== String(row.text || '').trim() ? String(edit.text || '').trim() : null;
+    if (volby.every(v => v === null) && text === null) continue;
+    out.push({ nazev: row.nazev, dvojice: row.volby.map(v => [v[0], v[1]]), volby, text });
+  }
+  return out;
+}
+function zaverChanged(draft, src) {
+  const z = draft.hyd_zaver, orig = src && src.hydranty && src.hydranty.zaver;
+  if (!z || !orig) return false;
+  return z.vysledek !== orig.vysledek || !sameList(z.text, orig.text) || !sameList(z.doporuceni, orig.doporuceni);
+}
+function noChanged(draft, src) {
+  const orig = src && src.no;
+  if (!orig) return { doklad: false, stavy: [] };
+  const stavy = (orig.seznam || []).filter(r => draft.no_stavy[r.radek] !== undefined && draft.no_stavy[r.radek].trim() !== r.stav)
+    .map(r => ({ radek: r.radek, umisteni: r.umisteni, stav: draft.no_stavy[r.radek].trim() }));
+  const d = draft.no_doklad, od = orig.doklad;
+  const doklad = !!(d && od && (d.zjistene.trim() !== od.zjistene || d.odstraneni.trim() !== od.odstraneni));
+  return { doklad, stavy };
+}
 function poValues(draft) {
-  const d = draft.d;
-  return draft.po.minule !== null || draft.po.zavady.length > 0 || d.chybi_php !== null || d.chybi_znaceni !== null || !!d.jine.trim();
+  const d = draft.d, src = sourceOf(draft);
+  return draft.po.minule !== null || draft.po.zavady.length > 0 || d.chybi_php !== null || d.chybi_znaceni !== null || !!d.jine.trim()
+    || changedRowsA(draft, src).length > 0
+    || (draft.po_c !== null && src && src.po && !sameList(draft.po_c, src.po.c))
+    || (draft.po_d !== null && src && src.po && !sameList(draft.po_d, src.po.d));
 }
 function roleValues(draft, role) {
+  const src = sourceOf(draft);
   if (role === 'po') return poValues(draft);
   if (role === 'php') return draft.php.length > 0;
-  if (role === 'hydranty') return draft.hyd_zavady.length > 0;
+  if (role === 'hydranty') return draft.hyd_zavady.length > 0 || zaverChanged(draft, src);
+  if (role === 'nouzove_osvetleni') { const n = noChanged(draft, src); if (n.doklad || n.stavy.length) return true; }
   return draft.pbz[role].length > 0;
 }
 
@@ -184,10 +281,29 @@ function validate(draft) {
   });
   draft.hyd_mereni.forEach((m, i) => {
     if (!m.umisteni.trim()) errors.push(`B2 – měření ${i + 1}: chybí umístění hydrantu.`);
-    if (!['tlak_p1', 'tlak_p2', 'tlak_rozdil', 'prutok'].some(k => m[k].trim())) errors.push(`B2 – měření ${i + 1}: zapiš aspoň jednu naměřenou hodnotu.`);
+    if (!MEASURE_KEYS.some(k => String(m[k] || '').trim())) errors.push(`B2 – měření ${i + 1}: zapiš aspoň jednu naměřenou hodnotu.`);
+    for (const k of MEASURE_KEYS) if (String(m[k] || '').trim() && !/^\d{1,5}([.,]\d{1,6})?$/.test(String(m[k]).trim())) errors.push(`B2 – měření ${i + 1}: hodnota „${m[k]}“ musí být číslo (např. 0,45).`);
   });
-  draft.hyd_zavady.forEach((z, i) => { if (!z.trim()) errors.push(`B2 – závada ${i + 1}: prázdný text.`); });
+  if (draft.hyd_zavady.length) errors.push('B2 – volný text závad hydrantů program do protokolu nezapíše: odeber ho a závadu zapiš do Závěru (doporučení).');
   for (const role of PBZ) draft.pbz[role].forEach((r, i) => { if (!r.popis.trim()) errors.push(`${ROLE_NAME[role]} ${i + 1}: chybí popis.`); });
+  const src = sourceOf(draft);
+  if (src && src.po) {
+    for (const row of src.po.a) {
+      const st = rowState(row, draft);
+      if (row.text !== null && row.volby[0][0].toLowerCase().startsWith('záv') && st.volby[0] === 0 && !String(st.text || '').trim()) {
+        errors.push(`A – ${row.nazev}: zapiš text závady.`);
+      }
+    }
+  }
+  if (zaverChanged(draft, src)) {
+    const z = draft.hyd_zaver, max = src.hydranty.zaver.max_doporuceni;
+    if (z.text.some(t => !t.trim())) errors.push('B2 – Závěr: řádek textu závěru nesmí být prázdný.');
+    if (z.doporuceni.filter(t => t.trim()).length > max) errors.push(`B2 – Závěr má v protokolu místo jen pro ${max} doporučení.`);
+  }
+  if (noChanged(draft, src).doklad && !draft.no_doklad.zjistene.trim()) errors.push('C – Nouzové osvětlení: vyplň Zjištěné závady v dokladu.');
+  if (src && src.no && draft.pbz.nouzove_osvetleni.length && noChanged(draft, src).doklad) {
+    errors.push('C – Nouzové osvětlení: zapiš závady buď do dokladu, nebo jako změny – ne obojí.');
+  }
   return errors;
 }
 
@@ -218,17 +334,36 @@ function build(draft) {
       nove_zavady: draft.po.zavady.map(z => ({ umisteni: text(z.umisteni), popis: text(z.popis), opatreni: text(z.opatreni) })),
     },
     php_evidence: evidence, php_zmeny: changes,
-    hydranty_mereni: draft.hyd_mereni.map(m => ({ id: text(m.id), umisteni: text(m.umisteni), tlak_p1: text(m.tlak_p1) || null,
-      tlak_p2: text(m.tlak_p2) || null, tlak_rozdil: text(m.tlak_rozdil) || null, prutok: text(m.prutok) || null })),
+    hydranty_mereni: draft.hyd_mereni.map(m => {
+      const row = { id: text(m.id), umisteni: text(m.umisteni) };
+      for (const key of MEASURE_KEYS) if (text(m[key])) row[key] = text(m[key]);
+      return row;
+    }),
     hydranty_zavady: draft.hyd_zavady.map(text),
     pbz_zmeny: Object.fromEntries(PBZ.map(role => [role, draft.pbz[role].map(r => ({ id: text(r.id), umisteni: text(r.umisteni), popis: text(r.popis), hodnoty: {} }))])),
     zavady_d: { chybi_php: draft.d.chybi_php, chybi_bezpecnostni_znaceni: draft.d.chybi_znaceni, jine: text(draft.d.jine) },
   };
-  return {
+  // Úpravy existujících polí protokolů (jen to, co se oproti dokumentu změnilo).
+  const src = sourceOf(draft);
+  const lines = list => (list || []).map(text).filter(Boolean);
+  const rowsA = changedRowsA(draft, src);
+  if (rowsA.length) object.po_a = rowsA;
+  if (src && src.po && draft.po_c !== null && !sameList(draft.po_c, src.po.c)) object.po_c = lines(draft.po_c);
+  if (src && src.po && draft.po_d !== null && !sameList(draft.po_d, src.po.d)) object.po_d = lines(draft.po_d);
+  if (zaverChanged(draft, src)) {
+    object.hydranty_zaver = { vysledek: draft.hyd_zaver.vysledek, text: draft.hyd_zaver.text.map(text), doporuceni: lines(draft.hyd_zaver.doporuceni) };
+  }
+  const no = noChanged(draft, src);
+  if (no.doklad) object.pbz_doklad = { nouzove_osvetleni: { zjistene: text(draft.no_doklad.zjistene), odstraneni: text(draft.no_doklad.odstraneni) } };
+  if (no.stavy.length) object.no_seznam = no.stavy;
+  const result = {
     schema_checklist: 'CL-A4-02', udaje_se_nevesly: false, ico: text(draft.ico), subjekt: text(draft.subjekt),
     novy_objekt: draft.novy_objekt, datum_kontroly: czDate(draft.datum), zdrojovy_prepis: '', varovani: [],
     objekty: [object],
   };
+  // Podle složky správce zařadí program na PC objekt do správné dávky („Z telefonu“).
+  if (src && src.slozka) result.telefon = { id: src.id, slozka: src.slozka, sada: src.sada || '', aplikace: APP_VERSION };
+  return result;
 }
 
 function fileName(draft) {
@@ -245,7 +380,7 @@ backBtn.addEventListener('click', () => { location.hash = '#/'; });
 function route() {
   const hash = location.hash || '#/';
   const match = /^#\/c\/(.+)$/.exec(hash);
-  if (match && drafts[decodeURIComponent(match[1])]) return renderChecklist(drafts[decodeURIComponent(match[1])]);
+  if (match && drafts[decodeURIComponent(match[1])]) return renderChecklist(ensureDraft(drafts[decodeURIComponent(match[1])]));
   if (hash === '#/o-aplikaci') return renderAbout();
   renderList();
 }
@@ -254,17 +389,18 @@ window.addEventListener('hashchange', route);
 function setTitle(text, back) { titleEl.textContent = text; backBtn.hidden = !back; document.title = text; }
 function clear() { app.replaceChildren(); document.querySelector('.fab')?.remove(); }
 
+async function applyList(data) {
+  if (data.schema !== 'lhutnik-telefon-1' || !Array.isArray(data.objekty)) throw new Error('Soubor není seznam objektů z lhůtníku.');
+  seznam = { vytvoreno: data.vytvoreno || '', nazev: data.nazev || '', polozky: data.objekty, katalog: data.katalog || seznam.katalog || [] };
+  await saveSeznam();
+  const extra = ['po', 'hydranty', 'no'].map(k => data.objekty.filter(o => o[k]).length);
+  toast(`Načteno ${seznam.polozky.length} objektů (Kontrola PO ${extra[0]}, hydranty ${extra[1]}, NO ${extra[2]}).`, 5000);
+}
 function importList(file) {
   const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      const data = JSON.parse(reader.result);
-      if (data.schema !== 'lhutnik-telefon-1' || !Array.isArray(data.objekty)) throw new Error('Soubor není seznam objektů z lhůtníku.');
-      seznam = { vytvoreno: data.vytvoreno || '', nazev: data.nazev || '', polozky: data.objekty };
-      store.set('revize.seznam', seznam);
-      toast(`Načteno ${seznam.polozky.length} objektů.`);
-      renderList();
-    } catch (e) { toast('Seznam nelze načíst: ' + e.message, 6000); }
+  reader.onload = async () => {
+    try { await applyList(JSON.parse(reader.result)); renderList(); }
+    catch (e) { toast('Seznam nelze načíst: ' + e.message, 6000); }
   };
   reader.readAsText(file);
 }
@@ -275,7 +411,7 @@ function filePicker(accept, onFile) {
 
 function draftBadge(draft) {
   if (!draft) return null;
-  if (draft.stav === 'ulozeno') return h('span', { class: 'badge done' }, 'uloženo');
+  if (draft.stav === 'ulozeno') return h('span', { class: 'badge done' }, draft.nahrano === draft.zmeneno ? 'v OneDrive' : 'uloženo');
   return h('span', { class: 'badge draft' }, 'rozpracováno');
 }
 
@@ -356,10 +492,14 @@ function renderList() {
   fill();
 
   const fab = h('div', { class: 'fab' },
-    h('button', { class: 'btn', type: 'button', onclick: () => filePicker('.json,application/json', importList) }, 'Načíst seznam'),
-    h('button', { class: 'btn primary', type: 'button', onclick: () => openDraft(null) }, '+ Objekt mimo seznam'));
+    od.connected()
+      ? h('button', { class: 'btn primary', type: 'button', onclick: syncOneDrive }, 'Synchronizovat')
+      : h('button', { class: 'btn', type: 'button', onclick: () => filePicker('.json,application/json', importList) }, 'Načíst seznam'),
+    h('button', { class: 'btn' + (od.connected() ? '' : ' primary'), type: 'button', onclick: () => openDraft(null) }, '+ Objekt mimo seznam'));
   document.body.append(fab);
-  app.append(h('p', { class: 'muted', style: 'text-align:center' }, h('a', { href: '#/o-aplikaci' }, 'O aplikaci a zálohy')));
+  app.append(h('p', { class: 'muted', style: 'text-align:center' },
+    od.connected() ? [h('a', { href: '#/', onclick: e => { e.preventDefault(); filePicker('.json,application/json', importList); } }, 'Načíst seznam ze souboru'), ' · '] : null,
+    h('a', { href: '#/o-aplikaci' }, 'O aplikaci, OneDrive a zálohy')));
 }
 
 function xButton(label, onClick) {
@@ -375,7 +515,7 @@ function deleteDraft(draft) {
 function openDraft(source) {
   const id = source ? 'obj:' + source.id : null;
   let draft = id && drafts[id];
-  if (!draft) { draft = newDraft(source); drafts[draft.id] = draft; saveDrafts(true); }
+  if (!draft) { draft = ensureDraft(newDraft(source)); drafts[draft.id] = draft; saveDrafts(true); }
   location.hash = '#/c/' + encodeURIComponent(draft.id);
 }
 
@@ -408,8 +548,8 @@ function renderChecklist(draft) {
   // Pozice se čte až v okamžiku klepnutí – jinak by stránka odskočila na místo z minulého vykreslení.
   const rerender = () => { const y = window.scrollY; touch(draft); renderChecklist(draft); window.scrollTo(0, y); };
 
-  // Hlavička
-  const src = draft.zdroj;
+  // Hlavička: kontakt a termín z naposledy nahraného seznamu (draft.zdroj je stav z doby založení)
+  const src = (draft.zdroj && seznam.polozky.find(o => o.id === draft.zdroj.id)) || draft.zdroj;
   app.append(h('div', { class: 'card' },
     src ? h('p', { class: 'muted', style: 'margin:0 0 6px' }, `${src.zkratka || src.zakaznik} · ${src.sada || ''} · termín ${src.termin || '—'}`,
       (src.osoba || src.telefon) ? h('br') : null, [src.osoba, src.telefon, src.email].filter(Boolean).join(' · ')) : null,
@@ -427,8 +567,20 @@ function renderChecklist(draft) {
     ROLES.map(([role, name]) => h('div', { class: 'scope' }, h('div', { class: 'name' }, name),
       seg(STATES, draft.stavy[role], v => { draft.stavy[role] = v; draft._open = draft._open || {}; if (v === 'zmeny') draft._open[role] = true; rerender(); })))));
 
-  // A + D
-  if (draft.stavy.po === 'zmeny') {
+  // A, C, D podle řádků Kontroly PO z exportu
+  if (draft.stavy.po === 'zmeny' && src && src.po) {
+    app.append(section(draft, 'po', 'A – Prohlídka PO (řádky protokolu)', poRows(draft, src.po, rerender), true));
+    if (src.po.c !== null) {
+      app.append(section(draft, 'po_c', 'C – Zjištěné skutečnosti, jiné závady', linesEditor(draft, 'po_c', src.po.c, 'po_c', rerender,
+        `Řádky se zapíší do sekce C protokolu (místa na ${src.po.c_poli} ${src.po.c_poli === 1 ? 'řádek' : 'řádky'}; delší text pokračuje v posledním).`), true));
+    }
+    if (src.po.d !== null) {
+      app.append(section(draft, 'po_d', src.po.c === null ? 'D – Zjištěné skutečnosti, opatření a termíny' : 'D – Navržená opatření a termíny',
+        linesEditor(draft, 'po_d', src.po.d, 'po_d', rerender, 'Řádky nahradí obsah sekce D v protokolu. Smaž, co už neplatí.'), true));
+    }
+  }
+  // A + D (objekt bez řádků Kontroly PO v exportu – zápis do D jako dříve)
+  if (draft.stavy.po === 'zmeny' && !(src && src.po)) {
     app.append(section(draft, 'po', 'A – Prohlídka PO a D – ostatní', [
       h('label', { class: 'field' }, h('span', null, 'Minulé závady odstraněny'),
         seg([[true, 'Ano'], [false, 'Ne']], draft.po.minule, v => { draft.po.minule = v; rerender(); }, 'toggle')),
@@ -452,6 +604,8 @@ function renderChecklist(draft) {
     const isLinked = row => !!row.ev && linked.has(row.ev);
     app.append(section(draft, 'php', `B – Hasicí přístroje (${inv ? inv.pristroje.length + ' v evidenci, ' : ''}${draft.php.length} ${draft.php.length === 1 ? 'změna' : 'změn'})`, [
       inv ? phpInventory(draft, inv, rerender) : null,
+      !inv && draft.novy_objekt !== true && src && src.php_chyba
+        ? h('p', { class: 'muted' }, h('b', null, 'Seznam PHP není k dispozici: '), src.php_chyba, ' Akce zapiš podle výrobního čísla.') : null,
       draft.novy_objekt === true ? h('p', { class: 'muted' }, 'U nového objektu zapiš všechny stávající přístroje jako „Evidence stávajícího“. Servis (TZ, oprava…) zapiš zvlášť.') : null,
       inv ? h('div', { style: 'font-weight:650;margin:14px 0 2px' }, 'Nové přístroje a další akce') : null,
       draft.php.map((row, i) => {
@@ -479,29 +633,48 @@ function renderChecklist(draft) {
     ], true));
   }
 
-  // B2 – hydranty
+  // B2 – hydranty: měření (Příloha 2) a Závěr
   if (draft.stavy.hydranty === 'zmeny' || draft.stavy.hydranty === 'beze_zmen') {
+    const hyd = src && src.hydranty;
+    const measured = new Set(draft.hyd_mereni.map(m => norm(m.umisteni) + '|' + norm(m.id)));
     app.append(section(draft, 'hydranty', `B2 – Hydranty – měření (${draft.hyd_mereni.length})`, [
       h('p', { class: 'muted' }, 'Tlaky v MPa, průtok v l/s, s desetinnou čárkou. Měření lze zapsat i při stavu Beze změn.'),
-      draft.hyd_mereni.map((m, i) => h('div', { class: 'item' },
-        h('div', { class: 'item-head' }, `Měření ${i + 1}`, removeBtn(() => { draft.hyd_mereni.splice(i, 1); rerender(); })),
-        h('div', { class: 'grid2' }, field('Číslo hydrantu', m, 'id', draft, { inputmode: 'numeric' }), field('Umístění', m, 'umisteni', draft, { required: true })),
-        h('div', { class: 'grid2' }, field('Tlak P1 (MPa)', m, 'tlak_p1', draft, { inputmode: 'decimal' }), field('Tlak P2 (MPa)', m, 'tlak_p2', draft, { inputmode: 'decimal' })),
-        h('div', { class: 'grid2' }, field('Rozdíl (MPa)', m, 'tlak_rozdil', draft, { inputmode: 'decimal' }), field('Průtok (l/s)', m, 'prutok', draft, { inputmode: 'decimal' })))),
-      h('button', { class: 'btn', type: 'button', onclick: () => { draft.hyd_mereni.push({ id: '', umisteni: '', tlak_p1: '', tlak_p2: '', tlak_rozdil: '', prutok: '' }); rerender(); } }, '+ Přidat měření'),
-      draft.stavy.hydranty === 'zmeny' ? [
-        h('hr', { style: 'border:0;border-top:1px solid var(--line);margin:14px 0' }),
-        draft.hyd_zavady.map((z, i) => h('div', { class: 'item' },
-          h('div', { class: 'item-head' }, `Závada ${i + 1}`, removeBtn(() => { draft.hyd_zavady.splice(i, 1); rerender(); })),
-          h('textarea', { value: z, oninput: e => { draft.hyd_zavady[i] = e.target.value; touch(draft); } }))),
-        h('button', { class: 'btn', type: 'button', onclick: () => { draft.hyd_zavady.push(''); rerender(); } }, '+ Přidat závadu hydrantů'),
+      hyd && hyd.priloha2 && hyd.priloha2.length ? [
+        h('div', { style: 'font-weight:650;margin:6px 0 2px' }, 'Hydranty v Příloze 2 (minulé hodnoty)'),
+        hyd.priloha2.map(row => h('div', { class: 'item' + (measured.has(norm(row.umisteni) + '|' + norm(row.id)) ? ' picked' : '') },
+          h('div', { class: 'item-head' }, h('span', null, `${row.id ? row.id + ' ' : ''}${row.umisteni}`),
+            h('button', { class: 'btn small', type: 'button', onclick: () => {
+              const m = { id: row.id, umisteni: row.umisteni }; for (const k of MEASURE_KEYS) m[k] = '';
+              for (const k of MEASURE_KEYS) if (row[k] !== undefined) m[k] = '';
+              m._sloupce = MEASURE_KEYS.filter(k => row[k] !== undefined);
+              draft.hyd_mereni.push(m); rerender(); } }, 'Zapsat měření')),
+          h('div', { class: 'muted' }, MEASURE_KEYS.filter(k => row[k] !== undefined).map(k => `${MEASURE_NAME[k].split(' (')[0]} ${row[k] || '—'}`).join(' · ')))),
       ] : null,
+      draft.hyd_mereni.map((m, i) => {
+        const keys = m._sloupce && m._sloupce.length ? m._sloupce : ['tlak_p1', 'tlak_p2', 'tlak_rozdil', 'prutok'];
+        return h('div', { class: 'item' },
+          h('div', { class: 'item-head' }, `Měření ${i + 1}`, removeBtn(() => { draft.hyd_mereni.splice(i, 1); rerender(); })),
+          h('div', { class: 'grid2' }, field('Číslo hydrantu', m, 'id', draft), field('Umístění', m, 'umisteni', draft, { required: true })),
+          h('div', { class: 'grid2' }, keys.map(k => field(MEASURE_NAME[k], m, k, draft, { inputmode: 'decimal' }))));
+      }),
+      h('button', { class: 'btn', type: 'button', onclick: () => { draft.hyd_mereni.push({ id: '', umisteni: '', tlak_vytok: '', tlak_p1: '', tlak_p2: '', tlak_rozdil: '', prutok: '' }); rerender(); } }, '+ Měření jiného hydrantu'),
+      draft.hyd_zavady.map((z, i) => h('div', { class: 'item' },
+        h('div', { class: 'item-head' }, `Starý zápis závady ${i + 1} (nelze zapsat – přepiš do Závěru)`, removeBtn(() => { draft.hyd_zavady.splice(i, 1); rerender(); })),
+        h('p', { class: 'muted' }, z))),
     ], true));
+    if (hyd && hyd.zaver) app.append(section(draft, 'hyd_zaver', 'B2 – Hydranty – Závěr', zaverEditor(draft, hyd.zaver, rerender), draft.stavy.hydranty === 'zmeny'));
+    else if (draft.stavy.hydranty === 'zmeny') app.append(h('p', { class: 'muted card' }, 'Závěr hydrantů tohoto objektu není v exportu – závady zapiš na PC.'));
+  }
+
+  // C – nouzové osvětlení podle seznamu a dokladu
+  if (draft.stavy.nouzove_osvetleni === 'zmeny' && src && src.no) {
+    app.append(section(draft, 'no', 'C – Nouzové osvětlení (seznam a doklad)', noEditor(draft, src.no, rerender), true));
   }
 
   // C – ostatní PBZ
   for (const role of PBZ) {
     if (draft.stavy[role] !== 'zmeny') continue;
+    if (role === 'nouzove_osvetleni' && src && src.no && !draft.pbz[role].length) continue;
     app.append(section(draft, role, `${ROLE_NAME[role]} (${draft.pbz[role].length})`, [
       draft.pbz[role].map((r, i) => h('div', { class: 'item' },
         h('div', { class: 'item-head' }, `Změna ${i + 1}`, removeBtn(() => { draft.pbz[role].splice(i, 1); rerender(); })),
@@ -523,6 +696,131 @@ function renderChecklist(draft) {
     h('button', { class: 'btn primary', type: 'button', onclick: () => showResult(draft, result) }, 'Zkontrolovat a uložit JSON')));
 }
 
+/* ------------------------------------------------------------------ katalog závad */
+const KAT_NAZEV = { po_a: 'Řádek A', po_c: 'C – zjištěné skutečnosti', po_d: 'D – opatření', hydranty: 'Doporučení hydrantů', no: 'Nouzové osvětlení' };
+function pickFromCatalog(kat, radek, onPick) {
+  const items = (seznam.katalog || []).filter(i => i.k === kat && (kat !== 'po_a' || !i.r || norm(i.r) === norm(radek)));
+  const close = () => overlay.remove();
+  const listBox = h('div');
+  const fill = q => listBox.replaceChildren(...items.filter(i => !q || norm(i.t).includes(norm(q))).slice(0, 80).map(i =>
+    h('button', { class: 'pick', type: 'button', onclick: () => { close(); onPick(i.t); } }, i.t)));
+  const overlay = h('div', { class: 'overlay', onclick: e => { if (e.target === overlay) close(); } },
+    h('div', { class: 'sheet' },
+      h('div', { class: 'row nowrap' }, h('b', { class: 'grow' }, `Katalog – ${KAT_NAZEV[kat] || kat}${radek ? ': ' + radek : ''}`),
+        h('button', { class: 'btn small', type: 'button', onclick: close }, 'Zavřít')),
+      h('input', { type: 'search', placeholder: 'Hledat v katalogu…', oninput: e => fill(e.target.value) }),
+      items.length ? null : h('p', { class: 'muted' }, 'Katalog je prázdný. Na PC: Lhůtník › Katalog závad… a nový Export pro telefon.'),
+      h('p', { class: 'muted', style: 'margin:6px 0' }, 'Znak … po vložení nahraď (např. termínem).'),
+      listBox));
+  fill('');
+  document.body.append(overlay);
+}
+function catalogBtn(kat, radek, onPick) {
+  return h('button', { class: 'btn small', type: 'button', onclick: () => pickFromCatalog(kat, radek, onPick) }, 'Katalog');
+}
+
+/* Řádky sekce A z Kontroly PO: vybraná volba je v protokolu tučně; u „závady“ / „neproveden“ text. */
+function poRows(draft, po, rerender) {
+  const out = [h('p', { class: 'muted', style: 'margin:0 0 6px' }, 'Stav převzatý z protokolu. Změň jen to, co se liší – zapíše se do příslušného řádku.')];
+  for (const row of po.a) {
+    const st = rowState(row, draft);
+    const edit = () => (draft.po_a[row.nazev] = draft.po_a[row.nazev] || { volby: [...st.volby], text: st.text });
+    const changed = changedRowsA(draft, { po }).some(r => r.nazev === row.nazev);
+    const textual = row.text !== null;
+    const showText = textual && (st.volby[0] === 0 || String(st.text || '').trim());
+    out.push(h('div', { class: 'item' + (changed ? ' picked' : '') },
+      h('div', { class: 'item-head' }, h('span', null, row.nazev), changed ? h('button', { class: 'btn small', type: 'button',
+        onclick: () => { delete draft.po_a[row.nazev]; rerender(); } }, 'Vrátit') : null),
+      row.volby.map((pair, i) => h('div', { style: 'margin-top:6px' }, seg([[0, pair[0]], [1, pair[1]]], st.volby[i], v => {
+        const e = edit(); e.volby[i] = v;
+        if (i === 0 && textual && v === 1 && norm(pair[0]).startsWith('zav')) e.text = '';
+        rerender();
+      }))),
+      showText ? h('div', { class: 'row', style: 'margin-top:6px;align-items:flex-end' },
+        h('div', { class: 'grow' }, h('label', { class: 'field' }, h('span', null, norm(row.volby[0][0]).startsWith('zav') ? 'Popis závady' : 'Poznámka'),
+          h('textarea', { value: st.text || '', oninput: e => { edit().text = e.target.value; touch(draft); } }))),
+        catalogBtn('po_a', row.nazev, t => { const e = edit(); e.text = t; if (e.volby[0] !== 0) e.volby[0] = 0; rerender(); })) : null));
+  }
+  return out;
+}
+
+/* Seznam řádků textu (C, D, doporučení): předvyplněno z protokolu, nahradí jeho obsah. */
+function linesEditor(draft, key, original, kat, rerender, note, holder) {
+  const target = holder || draft;
+  const list = target[key] !== null && target[key] !== undefined ? target[key] : [...(original || [])];
+  const commit = () => { target[key] = list; touch(draft); };
+  return [
+    h('p', { class: 'muted', style: 'margin:0 0 6px' }, note),
+    list.map((line, i) => h('div', { class: 'item' },
+      h('div', { class: 'item-head' }, `Řádek ${i + 1}`, h('button', { class: 'btn small danger', type: 'button', onclick: () => { list.splice(i, 1); commit(); rerender(); } }, 'Smazat')),
+      h('textarea', { value: line, oninput: e => { list[i] = e.target.value; commit(); } }))),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn', type: 'button', onclick: () => { list.push(''); commit(); rerender(); } }, '+ Řádek'),
+      catalogBtn(kat, '', t => { list.push(t); commit(); rerender(); }),
+      !sameList(list, original) ? h('button', { class: 'btn small', type: 'button', onclick: () => {
+        target[key] = holder ? [...(original || [])] : null; touch(draft); rerender(); } }, 'Vrátit podle protokolu') : null),
+  ];
+}
+
+function zaverEditor(draft, zaver, rerender) {
+  // Výchozí = obsah protokolu (dokud se neliší, nic se nezapisuje).
+  const z = draft.hyd_zaver = draft.hyd_zaver || { vysledek: zaver.vysledek, text: [...zaver.text], doporuceni: [...zaver.doporuceni] };
+  const keep = () => { draft.hyd_zaver = z; if (zaverChanged(draft, sourceOf(draft)) && draft.stavy.hydranty !== 'zmeny') draft.stavy.hydranty = 'zmeny'; touch(draft); };
+  return [
+    h('label', { class: 'field' }, h('span', null, 'Zařízení … požadavkům ČSN'),
+      h('div', { class: 'seg' }, VYROKY.map(v => h('button', { type: 'button', 'aria-pressed': String(z.vysledek === v),
+        onclick: () => { z.vysledek = v; keep(); rerender(); } }, v)))),
+    h('div', { style: 'font-weight:650;margin:10px 0 2px' }, 'Text závěru (řádky protokolu)'),
+    z.text.map((line, i) => h('textarea', { value: line, style: 'margin:4px 0', oninput: e => { z.text[i] = e.target.value; keep(); } })),
+    h('div', { style: 'font-weight:650;margin:10px 0 2px' }, `Doporučení a návrhy opatření (max. ${zaver.max_doporuceni})`),
+    linesEditor(draft, 'doporuceni', zaver.doporuceni, 'hydranty', () => { keep(); rerender(); },
+      'Pořadí = číslování 1., 2., … v protokolu. Závadu dej jako první doporučení s termínem.', z),
+    draft.hyd_zaver && zaverChanged(draft, sourceOf(draft)) ? h('button', { class: 'btn small', type: 'button', onclick: () => { draft.hyd_zaver = null; touch(draft); rerender(); } }, 'Vrátit Závěr podle protokolu') : null,
+  ];
+}
+
+function inDays(days) { const d = new Date(); d.setDate(d.getDate() + days); return `${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()}`; }
+function noEditor(draft, no, rerender) {
+  const original = no.doklad || { zjistene: '', odstraneni: '' };
+  const d = draft.no_doklad || { zjistene: original.zjistene, odstraneni: original.odstraneni };
+  const keep = () => { draft.no_doklad = d; touch(draft); };
+  const state = r => (draft.no_stavy[r.radek] !== undefined ? draft.no_stavy[r.radek] : r.stav);
+  const suggest = () => {
+    const bad = (no.seznam || []).filter(r => norm(state(r)) !== 'vyhovuje');
+    d.zjistene = bad.length
+      ? 'PBZ je s omezením schopno řádně plnit svoji funkci s výjimkou nouzového osvětlení viz přiložený seznam.'
+      : 'PBZ je schopno řádně plnit svoji funkci, provedenou kontrolou nebyly zjištěny žádné zjevné závady viz přiložený seznam.';
+    d.odstraneni = bad.length ? `Neprodleně dle možností provozovatele, nejpozději však do ${inDays(60)}.` : '';
+    keep(); rerender();
+  };
+  return [
+    no.seznam && no.seznam.length ? [
+      h('div', { style: 'font-weight:650;margin:0 0 2px' }, `Seznam svítidel (${no.seznam.length})`),
+      no.seznam.map(r => {
+        const value = state(r);
+        const custom = !NO_STAVY.includes(value);
+        return h('div', { class: 'item' + (value !== r.stav ? ' picked' : '') },
+          h('div', { class: 'item-head' }, h('span', null, r.umisteni), h('span', { class: 'badge' + (norm(value) !== 'vyhovuje' ? ' draft' : '') }, value || '—')),
+          r.typ && r.typ !== '-' ? h('div', { class: 'muted' }, r.typ) : null,
+          h('select', { style: 'margin-top:6px', onchange: e => {
+            const v = e.target.value === '__jine' ? (prompt('Stav svítidla:', custom ? value : '') || value) : e.target.value;
+            draft.no_stavy[r.radek] = v; if (draft.stavy.nouzove_osvetleni !== 'zmeny') draft.stavy.nouzove_osvetleni = 'zmeny'; touch(draft); rerender(); } },
+            [...NO_STAVY, ...(custom ? [value] : [])].map(s => h('option', { value: s, selected: s === value }, s)), h('option', { value: '__jine' }, 'jiný stav…')));
+      }),
+    ] : h('p', { class: 'muted' }, 'Seznam svítidel k objektu není v exportu.'),
+    no.doklad ? [
+      h('div', { style: 'font-weight:650;margin:12px 0 2px' }, 'Doklad o kontrole NO'),
+      h('label', { class: 'field' }, h('span', { class: 'req' }, 'Zjištěné závady'),
+        h('textarea', { value: d.zjistene, oninput: e => { d.zjistene = e.target.value; keep(); } })),
+      h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', onclick: suggest }, 'Navrhnout podle seznamu'),
+        catalogBtn('no', '', t => { d.zjistene = t; keep(); rerender(); })),
+      no.doklad.odstraneni_pole ? h('label', { class: 'field' }, h('span', null, 'Odstranění závad (prázdné = bez závad)'),
+        h('textarea', { value: d.odstraneni, oninput: e => { d.odstraneni = e.target.value; keep(); } })) : null,
+      draft.no_doklad && noChanged(draft, sourceOf(draft)).doklad ? h('button', { class: 'btn small', type: 'button', onclick: () => { draft.no_doklad = null; touch(draft); rerender(); } }, 'Vrátit doklad podle protokolu') : null,
+    ] : h('p', { class: 'muted' }, 'Doklad NO objektu není v exportu (např. vlastník bez IČO) – text dokladu uprav na PC.'),
+  ];
+}
+
 /* Evidence PHP z protokolu: stejné akce jako v tabulce PHP na PC (TZ, oprava, vyřazení, výměna).
    „Auto“ = nic nezapisovat, program na PC vyhodnotí stav sám (TZ v termínu, konec životnosti). */
 const AUTO_TEXT = {
@@ -534,7 +832,8 @@ function phpInventory(draft, inv, rerender) {
   const year = yearOf(draft);
   const box = [h('p', { class: 'muted', style: 'margin:0 0 6px' },
     `Evidence z protokolu ${inv.posledni_kontrola || ''}. „Auto“ = nic neměň, program na PC stav spočítá sám.`,
-    inv.rok && inv.rok !== year ? h('b', null, ` Automatický stav je spočítán pro rok ${inv.rok}, kontrola je v roce ${year}.`) : null)];
+    inv.rok && inv.rok !== year ? h('b', null, ` Automatický stav je spočítán pro rok ${inv.rok}, kontrola je v roce ${year}.`) : null,
+    inv.upozorneni ? h('b', null, ' ' + inv.upozorneni) : null)];
   for (const unit of inv.pristroje) {
     const key = unit.vyrobni_cislo.trim().toLowerCase();
     const index = draft.php.findIndex(r => r.ev === key);
@@ -578,11 +877,18 @@ function showResult(draft, box) {
   const data = build(draft);
   const json = JSON.stringify(data, null, 2);
   const name = fileName(draft);
+  const send = async () => {
+    try { await uploadDraft(draft); toast('Checklist odeslán do OneDrive › Revize_telefon › checklisty.'); showResult(draft, box); }
+    catch (e) { toast(e.message, 7000); }
+  };
   box.replaceChildren(h('div', { class: 'card' },
-    h('div', { class: 'ok' }, 'Checklist je úplný.'),
-    h('p', { class: 'muted' }, 'Ulož ho do OneDrive (např. PRÁCE › checklisty). V programu na PC ho připoj přes „Připojit JSON…“ – zobrazí se kontrolní náhled.'),
+    h('div', { class: 'ok' }, draft.nahrano === draft.zmeneno ? 'Checklist je úplný a odeslaný do OneDrive.' : 'Checklist je úplný.'),
+    h('p', { class: 'muted' }, od.connected()
+      ? 'Odešli ho do OneDrive. Na PC ho najdeš v Pracovní dávce pod tlačítkem „Z telefonu“.'
+      : 'Ulož ho do OneDrive › Revize_telefon › checklisty. Na PC ho najdeš v Pracovní dávce pod tlačítkem „Z telefonu“.'),
     h('div', { class: 'row' },
-      h('button', { class: 'btn primary grow', type: 'button', onclick: () => shareJson(draft, json, name) }, 'Uložit / sdílet'),
+      od.connected() ? h('button', { class: 'btn primary grow', type: 'button', onclick: send }, 'Odeslat do OneDrive') : null,
+      h('button', { class: 'btn grow' + (od.connected() ? '' : ' primary'), type: 'button', onclick: () => shareJson(draft, json, name) }, 'Uložit / sdílet'),
       h('button', { class: 'btn', type: 'button', onclick: () => downloadJson(draft, json, name) }, 'Stáhnout')),
     h('details', { style: 'margin-top:10px' }, h('summary', { class: 'muted' }, 'Zobrazit JSON'), h('pre', null, json))));
   box.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -607,6 +913,19 @@ function downloadJson(draft, json, name) {
 function renderAbout() {
   clear(); setTitle('O aplikaci', true);
   const backup = () => downloadJsonRaw(JSON.stringify({ schema: 'revize-pwa-zaloha-1', koncepty: drafts, seznam }, null, 2), `revize_zaloha_${todayIso()}.json`);
+  const cfg = od.cfg();
+  const status = od.connected() ? 'Propojeno – Synchronizovat stáhne seznam a odešle uložené checklisty.'
+    : cfg.clientId ? 'Nepřihlášeno.' : 'Nenastaveno – vlož ID aplikace z registrace v Microsoft Entra (postup v README).';
+  app.append(h('div', { class: 'card' },
+    h('div', { style: 'font-weight:650' }, 'OneDrive – automatická výměna s PC'),
+    h('p', { class: 'muted' }, `Složka OneDrive › ${OD_DIR}: seznam.json (z PC) a checklisty (z telefonu). ${status}`),
+    h('label', { class: 'field' }, h('span', null, 'ID aplikace (Application / Client ID)'),
+      h('input', { value: cfg.clientId, autocapitalize: 'none', autocomplete: 'off', placeholder: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+        oninput: e => { cfg.clientId = e.target.value.trim(); store.set('revize.onedrive', cfg); } })),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn primary', type: 'button', onclick: () => {
+        store.set('revize.onedrive', { ...cfg, clientId: cfg.clientId.trim() }); od.login().catch(e => toast(e.message, 6000)); } }, od.connected() ? 'Přihlásit znovu' : 'Přihlásit k OneDrive'),
+      od.connected() ? h('button', { class: 'btn', type: 'button', onclick: () => { od.logout(); renderAbout(); } }, 'Odhlásit') : null)));
   app.append(h('div', { class: 'card' },
     h('p', null, `Verze ${APP_VERSION}. Aplikace funguje i bez internetu. Seznam objektů a rozpracované checklisty jsou uložené jen v tomto telefonu.`),
     h('p', { class: 'muted' }, 'Na plochu ji přidáš v Safari: Sdílet › Přidat na plochu.'),
@@ -623,6 +942,103 @@ function downloadJsonRaw(json, name) {
   document.body.append(link); link.click(); setTimeout(() => { URL.revokeObjectURL(url); link.remove(); }, 2000);
 }
 
+/* ------------------------------------------------------------------ OneDrive (bez serveru)
+   Přihlášení účtem Microsoft (OAuth 2.0 s PKCE), přístup jen ke složce OneDrive › Revize_telefon:
+   stažení seznam.json z PC a nahrání hotových checklistů do Revize_telefon/checklisty. */
+const OD_DIR = 'Revize_telefon';
+const OD_SCOPE = 'Files.ReadWrite offline_access';
+const b64url = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const randomText = n => b64url(crypto.getRandomValues(new Uint8Array(n)));
+const od = {
+  cfg() { return store.get('revize.onedrive', { clientId: '', authority: 'common' }); },
+  tokens() { return store.get('revize.onedrive.token', null); },
+  connected() { return !!(this.cfg().clientId && this.tokens()); },
+  redirect() { return location.origin + location.pathname; },
+  base() { return `https://login.microsoftonline.com/${this.cfg().authority || 'common'}/oauth2/v2.0`; },
+  async login() {
+    const cfg = this.cfg();
+    if (!cfg.clientId) throw new Error('Nejdřív vlož ID aplikace (Client ID).');
+    const verifier = randomText(48), state = randomText(12);
+    const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+    store.set('revize.onedrive.pkce', { verifier, state });
+    const q = new URLSearchParams({ client_id: cfg.clientId, response_type: 'code', redirect_uri: this.redirect(), scope: OD_SCOPE,
+      code_challenge: challenge, code_challenge_method: 'S256', state, prompt: 'select_account' });
+    location.assign(`${this.base()}/authorize?${q}`);
+  },
+  async _token(params) {
+    const response = await fetch(`${this.base()}/token`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: this.cfg().clientId, scope: OD_SCOPE, ...params }) });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.access_token) throw new Error(data.error_description || data.error || ('HTTP ' + response.status));
+    store.set('revize.onedrive.token', { access: data.access_token, refresh: data.refresh_token || (this.tokens() || {}).refresh,
+      exp: Date.now() + (Number(data.expires_in) || 3600) * 1000 });
+  },
+  async finishLogin() {
+    const q = new URLSearchParams(location.search);
+    if (!q.get('code') && !q.get('error')) return false;
+    history.replaceState(null, '', this.redirect() + location.hash);
+    const pkce = store.get('revize.onedrive.pkce', null);
+    localStorage.removeItem('revize.onedrive.pkce');
+    if (q.get('error')) { toast('Přihlášení k OneDrive se nezdařilo: ' + (q.get('error_description') || q.get('error')), 7000); return true; }
+    if (!pkce || pkce.state !== q.get('state')) { toast('Přihlášení k OneDrive: neplatná odpověď, zkus to znovu.', 6000); return true; }
+    try { await this._token({ grant_type: 'authorization_code', code: q.get('code'), redirect_uri: this.redirect(), code_verifier: pkce.verifier }); toast('OneDrive propojen.'); }
+    catch (e) { toast('Přihlášení k OneDrive se nezdařilo: ' + e.message, 7000); }
+    return true;
+  },
+  async access() {
+    const t = this.tokens();
+    if (!t) throw new Error('Telefon není propojen s OneDrive (O aplikaci › OneDrive).');
+    if (t.exp > Date.now() + 60000) return t.access;
+    try { await this._token({ grant_type: 'refresh_token', refresh_token: t.refresh }); return this.tokens().access; }
+    catch (e) { localStorage.removeItem('revize.onedrive.token'); throw new Error('Přihlášení k OneDrive vypršelo – přihlas se znovu (O aplikaci › OneDrive).'); }
+  },
+  async graph(path, opts = {}) {
+    const response = await fetch('https://graph.microsoft.com/v1.0/me/drive/root:/' + path.split('/').map(encodeURIComponent).join('/') + (opts.suffix || ''),
+      { method: opts.method || 'GET', headers: { Authorization: 'Bearer ' + await this.access(), ...(opts.type ? { 'Content-Type': opts.type } : {}) }, body: opts.body });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error('OneDrive: HTTP ' + response.status);
+    return response.json();
+  },
+  async download(path) {
+    const meta = await this.graph(path);
+    if (!meta) return null;
+    const response = await fetch(meta['@microsoft.graph.downloadUrl']);
+    if (!response.ok) throw new Error('OneDrive: stažení se nezdařilo (' + response.status + ')');
+    return { meta, data: await response.json() };
+  },
+  upload(path, text) { return this.graph(path, { method: 'PUT', suffix: ':/content', type: 'application/json', body: text }); },
+  logout() { localStorage.removeItem('revize.onedrive.token'); },
+};
+async function uploadDraft(draft) {
+  const json = JSON.stringify(build(draft), null, 2);
+  await od.upload(`${OD_DIR}/checklisty/${fileName(draft)}`, json);
+  draft.stav = 'ulozeno'; draft.ulozeno = draft.ulozeno || new Date().toISOString(); draft.nahrano = draft.zmeneno;
+  drafts[draft.id] = draft; saveDrafts(true);
+}
+async function syncOneDrive() {
+  if (syncOneDrive.running) return;
+  syncOneDrive.running = true;
+  try {
+    toast('Synchronizuji s OneDrive…', 20000);
+    let sent = 0, skipped = 0;
+    for (const draft of Object.values(drafts)) {
+      if (draft.stav !== 'ulozeno' || draft.nahrano === draft.zmeneno) continue;
+      if (validate(ensureDraft(draft)).length) { skipped++; continue; }
+      await uploadDraft(draft); sent++;
+    }
+    let got = '';
+    const remote = await od.download(`${OD_DIR}/seznam.json`);
+    if (remote && remote.meta.lastModifiedDateTime !== seznam.od_zmeneno) {
+      await applyList(remote.data);
+      seznam.od_zmeneno = remote.meta.lastModifiedDateTime; await saveSeznam();
+      got = ` Nový seznam: ${seznam.polozky.length} objektů.`;
+    }
+    toast(`Odesláno ${sent} checklistů.${skipped ? ` ${skipped} neúplných zůstalo v telefonu.` : ''}${got || ' Seznam je aktuální.'}`, 6000);
+    if (!location.hash || location.hash === '#/') renderList();
+  } catch (e) { toast(e.message, 7000); }
+  finally { syncOneDrive.running = false; }
+}
+
 /* ------------------------------------------------------------------ start */
 function updateOnline() { document.getElementById('offline').hidden = navigator.onLine; }
 window.addEventListener('online', updateOnline); window.addEventListener('offline', updateOnline);
@@ -631,5 +1047,5 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-window.revize = { build, validate, newDraft, icoOk };  // pro kontrolu a testy
-route();
+window.revize = { build, validate, newDraft, ensureDraft, icoOk, applyList, drafts: () => drafts, seznam: () => seznam };  // pro kontrolu a testy
+loadSeznam().then(() => od.finishLogin()).catch(() => {}).then(route);

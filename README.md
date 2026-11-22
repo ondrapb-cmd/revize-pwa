@@ -7,13 +7,51 @@ Adresa aplikace: **https://ondrapb-cmd.github.io/revize-pwa/**
 - Funguje offline (service worker). Seznam objektů i rozpracované checklisty jsou jen v telefonu.
 - Přes telefon se řeší jednodušší objekty; ostatní objekty odeber ze seznamu červeným **✕**.
 
+## Novinky ve verzi 1.2.0
+
+- **Kontrola PO po řádcích:** sekce A ukazuje řádky protokolu (Osvětlení, Průchodnost chodby, Úklid…)
+  s volbou, která je teď v protokolu vybraná (tučně). Změníš jen to, co se liší, a u „závady“ napíšeš text.
+  Sekce **C** (zjištěné skutečnosti) a **D** (opatření) jsou předvyplněné textem z protokolu – smaž, co
+  neplatí, přidej nové řádky. Zapíše se přesně do těchto polí.
+- **Hydranty:** seznam hydrantů z Přílohy 2 s minulými hodnotami („Zapsat měření“ předvyplní číslo
+  a umístění) a **Závěr** – výrok (odpovídá / s omezením / neodpovídá), řádky textu a číslovaná doporučení.
+- **Nouzové osvětlení:** seznam svítidel se stavem (vyhovuje / nefunkční / mimo provoz / jiný) a texty
+  **Dokladu** (Zjištěné závady, Odstranění závad). „Navrhnout podle seznamu“ doplní obvyklé věty.
+- **Katalog závad:** tlačítko **Katalog** u textů – výběr typové závady nebo opatření jedním klepnutím.
+  Katalog se spravuje na PC (Lhůtník › Katalog závad…) a přichází s exportem.
+- **OneDrive:** tlačítko **Synchronizovat** stáhne seznam z PC a odešle uložené checklisty (viz níže).
+- Seznam objektů je teď v databázi telefonu (IndexedDB) – unese i velký export s podklady.
+
+## Výměna s PC přes OneDrive (složka `OneDrive\Revize_telefon`)
+
+- **PC → telefon:** Lhůtník › Export pro telefon uloží seznam vždy i jako `Revize_telefon\seznam.json`.
+- **Telefon → PC:** checklisty patří do `Revize_telefon\checklisty`. Program na PC je hlídá: v Pracovní
+  dávce svítí **Z telefonu (počet)**. Klepnutím objekt zařadí do dávky správného správce (nebo do fronty)
+  a otevře kontrolu přečtených údajů. Převzaté checklisty se už nenabízí.
+- Bez propojení: v telefonu **Uložit / sdílet › Uložit do Souborů › OneDrive › Revize_telefon › checklisty**.
+
+### Propojení aplikace s OneDrive (jednou, volitelné)
+
+Aplikace se přihlásí tvým účtem Microsoft a smí jen číst a zapisovat soubory na tvém OneDrive
+(používá jen složku Revize_telefon). Potřebuje k tomu „registraci aplikace“ u Microsoftu:
+
+1. Na PC otevři **https://entra.microsoft.com** a přihlas se účtem, ke kterému patří OneDrive.
+2. **Aplikace › Registrace aplikací › Nová registrace**: název `Revize telefon`; typ účtů
+   **Účty v libovolném adresáři organizace a osobní účty Microsoft**.
+3. **Identifikátor URI pro přesměrování**: platforma **Jednostránková aplikace (SPA)**,
+   adresa `https://ondrapb-cmd.github.io/revize-pwa/` → Zaregistrovat.
+4. Zkopíruj **ID aplikace (klienta)**.
+5. V telefonu: **O aplikaci, OneDrive a zálohy** › vlož ID › **Přihlásit k OneDrive** › potvrď přístup.
+6. Od té doby stačí na seznamu objektů **Synchronizovat**. Přihlášení platí zhruba den; pak tě aplikace
+   požádá o nové přihlášení (pár klepnutí).
+
 ---
 
 ## Postup práce
 
 ### Jednou na začátku
 
-**PC:** v OneDrive založ složku pro výměnu s telefonem, např. `PRÁCE\Lhutník\Telefon`.
+**PC:** složku pro výměnu s telefonem `OneDrive\Revize_telefon` založí program sám při prvním exportu.
 
 **iPhone:**
 1. Nainstaluj z App Store aplikaci **OneDrive** a přihlas se.
@@ -25,7 +63,7 @@ Adresa aplikace: **https://ondrapb-cmd.github.io/revize-pwa/**
 1. V programu **Lhůtník** nastav období (např. měsíc), případně zaškrtni jen vybrané objekty.
 2. **Export pro telefon…** → ulož do `OneDrive\PRÁCE\Lhutník\Telefon`.
    Export načte i **evidenci hasicích přístrojů** každého objektu (trvá to desítky sekund, ukazuje průběh).
-3. V telefonu: **Revize › Načíst seznam › Procházet › OneDrive › Telefon** → vyber soubor.
+3. V telefonu: **Synchronizovat**, nebo **Načíst seznam › Procházet › OneDrive › Revize_telefon › seznam.json**.
    Seznam zůstane v telefonu a funguje i bez signálu.
 
 ### Na místě (offline)
@@ -44,13 +82,14 @@ Adresa aplikace: **https://ondrapb-cmd.github.io/revize-pwa/**
 
 ### Uložení (telefon → PC)
 
-1. **Uložit / sdílet › Uložit do Souborů › OneDrive › Telefon › Uložit.** Checklist dostane štítek *uloženo*.
+1. **Odeslat do OneDrive** (při propojení), jinak **Uložit / sdílet › Uložit do Souborů › OneDrive › Revize_telefon › checklisty**.
 2. Když „Uložit do Souborů“ chybí: **Stáhnout** → soubor je v Soubory › Stažené, odtud ho přesuň do OneDrive.
 
 ### Zpracování na PC
 
-1. Počkej, až OneDrive stáhne `checklist_<datum>_<adresa>.json`.
-2. **Pracovní dávka** › vyber objekt › **3. Podklady › Připojit JSON…** → kontrolní náhled.
+1. Počkej, až OneDrive stáhne `checklist_<datum>_<adresa>.json` do `Revize_telefon\checklisty`.
+2. **Pracovní dávka › Z telefonu (počet)…** › Převzít vybrané → kontrolní náhled › Potvrdit.
+   (Ručně: vyber objekt › Upravit objekt › Načíst JSON….)
 3. Dál obvyklý postup (příprava, náhled změn, zápis). Změny PHP z telefonu se zapíší stejně
    jako z tabulky PHP v programu.
 

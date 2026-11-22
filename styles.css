@@ -80,3 +80,10 @@ a { color: var(--accent); }
 .seg.five button { font-size: 13px; padding: 0 2px; }
 .card.dim, .item.dim { opacity: .6; }
 .item.picked { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+/* Katalog závad – výběr textu přes celou obrazovku */
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 20; display: flex; align-items: flex-end; justify-content: center; }
+.sheet { background: var(--card); width: 100%; max-width: 760px; max-height: 82vh; overflow: auto; border-radius: 16px 16px 0 0;
+  padding: 14px 12px calc(env(safe-area-inset-bottom) + 14px); display: flex; flex-direction: column; gap: 8px; }
+.pick { display: block; width: 100%; text-align: left; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--card); margin: 4px 0; font-size: 16px; }
+.pick:active { background: var(--chip); }

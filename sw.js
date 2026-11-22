@@ -1,6 +1,6 @@
 /* Offline provoz: aplikace se uloží do telefonu při prvním otevření.
  * Při nové verzi stačí zvýšit CACHE – stará verze se po načtení nahradí. */
-const CACHE = 'revize-pwa-1.1.0';
+const CACHE = 'revize-pwa-1.2.0';
 const FILES = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest',
   './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png'];
 
