@@ -22,6 +22,15 @@ Adresa aplikace: **https://ondrapb-cmd.github.io/revize-pwa/**
 - **OneDrive:** tlačítko **Synchronizovat** stáhne seznam z PC a odešle uložené checklisty (viz níže).
 - Seznam objektů je teď v databázi telefonu (IndexedDB) – unese i velký export s podklady.
 
+## Části vedené pro celý dům (1.2.2)
+
+Některé domy mají PO a PHP po vchodech („Bráfova 23“, „25“…), ale hydranty pro celý dům
+(„Bráfova 23 - 29“). V telefonu se u každého vchodu objeví karta **Pro celý dům: Bráfova 23 - 29**:
+vyplní se jednou (u kteréhokoli vchodu) a platí pro všechny. Při uložení vchodu se uloží i tento
+checklist (2 soubory naráz). Export z PC ho přibere automaticky, i když jeho termín do období nespadá;
+v lhůtníku se zaškrtnutím vchodu přidá do dávky také. U objektu se zobrazují jen části, které má
+(ostatní jsou „Netýká se“), a tlačítko **Zbývající části beze změn** vyřeší zbytek jedním klepnutím.
+
 ## Výměna s PC přes OneDrive (složka `OneDrive\Revize_telefon`)
 
 - **PC → telefon:** Lhůtník › Export pro telefon uloží seznam vždy i jako `Revize_telefon\seznam.json`.
