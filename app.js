@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.2.2';
+const APP_VERSION = '1.2.5';
 const ROLES = [
   ['po', 'A – Preventivní prohlídka PO'], ['php', 'B – Hasicí přístroje'], ['hydranty', 'B2 – Hydranty'],
   ['pozarni_dvere', 'C – Požární uzávěry'], ['nouzove_osvetleni', 'C – Nouzové osvětlení'], ['ucpavky', 'C – Ucpávky'],
@@ -86,9 +86,31 @@ function isHidden(o) { return Object.prototype.hasOwnProperty.call(skryte, o.id)
 let saveTimer = null;
 function saveDrafts(now) {
   clearTimeout(saveTimer);
+  updateUnsent();
   if (now) { store.set('revize.koncepty', drafts); return; }
   saveTimer = setTimeout(() => store.set('revize.koncepty', drafts), 300);
 }
+/* Neodeslané checklisty: „jen v telefonu“ = rozpracované nebo změněné po uložení (při ztrátě telefonu
+   / smazání ikony zmizí); „čeká na OneDrive“ = uložené, ale aktuální obsah ještě není v OneDrive. */
+function unsentInfo() {
+  const all = Object.values(drafts);
+  const jenTelefon = all.filter(d => d.stav !== 'ulozeno');
+  const cekaOd = typeof od !== 'undefined' && od.connected() ? all.filter(d => d.stav === 'ulozeno' && d.nahrano !== d.zmeneno) : [];
+  const nejstarsi = [...jenTelefon, ...cekaOd].map(d => d.zmeneno || '').filter(Boolean).sort()[0] || '';
+  return { jenTelefon, cekaOd, celkem: jenTelefon.length + cekaOd.length, nejstarsi };
+}
+function updateUnsent() {
+  const info = unsentInfo();
+  const pill = document.getElementById('neodeslano');
+  if (pill) {
+    pill.hidden = !info.celkem;
+    pill.textContent = `${info.celkem} neodesl.`;
+    pill.setAttribute('aria-label', `Neodeslané checklisty: ${info.celkem}`);
+  }
+  try { if (navigator.setAppBadge) (info.celkem ? navigator.setAppBadge(info.celkem) : navigator.clearAppBadge()).catch(() => {}); } catch (e) { /* ikona bez čísla */ }
+  return info;
+}
+function daysSince(iso) { const t = Date.parse(iso || ''); return Number.isFinite(t) ? Math.floor((Date.now() - t) / 86400000) : 0; }
 
 /* ------------------------------------------------------------------ pomocné */
 function h(tag, props, ...kids) {
@@ -380,6 +402,7 @@ const backBtn = document.getElementById('back');
 backBtn.addEventListener('click', () => { location.hash = '#/'; });
 
 function route() {
+  updateUnsent();
   const hash = location.hash || '#/';
   const match = /^#\/c\/(.+)$/.exec(hash);
   if (match && drafts[decodeURIComponent(match[1])]) return renderChecklist(ensureDraft(drafts[decodeURIComponent(match[1])]));
@@ -413,8 +436,29 @@ function filePicker(accept, onFile) {
 
 function draftBadge(draft) {
   if (!draft) return null;
-  if (draft.stav === 'ulozeno') return h('span', { class: 'badge done' }, draft.nahrano === draft.zmeneno ? 'v OneDrive' : 'uloženo');
-  return h('span', { class: 'badge draft' }, 'rozpracováno');
+  if (draft.stav === 'ulozeno') {
+    if (draft.nahrano === draft.zmeneno) return h('span', { class: 'badge done' }, 'v OneDrive');
+    return od.connected() ? h('span', { class: 'badge draft' }, 'čeká na odeslání') : h('span', { class: 'badge done' }, 'uloženo');
+  }
+  return h('span', { class: 'badge draft' }, draft.stav === 'zmeneno' ? 'změněno po uložení' : 'rozpracováno');
+}
+function unsentBanner() {
+  const info = updateUnsent();
+  if (!info.celkem) return null;
+  const n = info.celkem, old = daysSince(info.nejstarsi);
+  const word = n === 1 ? 'checklist' : n < 5 ? 'checklisty' : 'checklistů';
+  return h('div', { class: 'card warn', role: 'status' },
+    h('div', { style: 'font-weight:700' }, `Neodesláno: ${n} ${word}`),
+    info.jenTelefon.length ? h('p', { style: 'margin:6px 0 0' }, info.jenTelefon.length === 1
+      ? '1 rozpracovaný nebo změněný – je jen v tomto telefonu. '
+      : `${info.jenTelefon.length} ${info.jenTelefon.length < 5 ? 'rozpracované nebo změněné' : 'rozpracovaných nebo změněných'} – jsou jen v tomto telefonu. `,
+      h('span', { class: 'muted' }, 'Dokonči je tlačítkem „Zkontrolovat a uložit JSON“.')) : null,
+    info.cekaOd.length ? h('p', { style: 'margin:6px 0 0' }, info.cekaOd.length === 1
+      ? '1 uložený čeká na odeslání do OneDrive.'
+      : `${info.cekaOd.length} ${info.cekaOd.length < 5 ? 'uložené čekají' : 'uložených čeká'} na odeslání do OneDrive.`) : null,
+    old >= 2 ? h('p', { style: 'margin:6px 0 0;font-weight:650' }, `Nejstarší neodeslaný je ${old} dní starý.`) : null,
+    info.cekaOd.length ? h('div', { class: 'row', style: 'margin-top:8px' },
+      h('button', { class: 'btn primary', type: 'button', onclick: syncOneDrive }, 'Odeslat nyní')) : null);
 }
 
 function renderList() {
@@ -423,6 +467,8 @@ function renderList() {
   let filter = sessionStorage.getItem('revize.filtr') || 'vse';
   let query = sessionStorage.getItem('revize.hledat') || '';
 
+  const banner = unsentBanner();
+  if (banner) app.append(banner);
   const open = Object.values(drafts).sort((a, b) => b.zmeneno.localeCompare(a.zmeneno));
   if (open.length) {
     app.append(h('h2', { class: 'muted', style: 'margin:4px 4px 8px;font-size:15px' }, 'ROZPRACOVANÉ A ULOŽENÉ CHECKLISTY'));
@@ -945,7 +991,9 @@ function showResult(draft, box) {
   const files = all.map(d => ({ draft: d, json: JSON.stringify(build(d), null, 2), name: fileName(d) }));
   const sent = all.every(d => d.nahrano === d.zmeneno);
   const send = async () => {
-    try { for (const d of all) await uploadDraft(d); toast(`Odesláno do OneDrive › Revize_telefon › checklisty (${all.length}).`); showResult(draft, box); }
+    // Část „pro celý dům“ odeslaná už od jiného vchodu (beze změny od té doby) se znovu neposílá.
+    const todo = all.filter(d => d === draft || d.nahrano !== d.zmeneno);
+    try { for (const d of todo) await uploadDraft(d); toast(`Odesláno do OneDrive › Revize_telefon › checklisty (${todo.length}).`); showResult(draft, box); }
     catch (e) { toast(e.message, 7000); }
   };
   box.replaceChildren(h('div', { class: 'card' },
@@ -980,7 +1028,8 @@ function downloadJson(file) {
 
 function renderAbout() {
   clear(); setTitle('O aplikaci', true);
-  const backup = () => downloadJsonRaw(JSON.stringify({ schema: 'revize-pwa-zaloha-1', koncepty: drafts, seznam }, null, 2), `revize_zaloha_${todayIso()}.json`);
+  const backup = () => downloadJsonRaw(backupJson(), `revize_zaloha_${todayIso()}.json`);
+  const lastBackup = store.get('revize.zaloha', '');
   const cfg = od.cfg();
   const status = od.connected() ? 'Propojeno – Synchronizovat stáhne seznam a odešle uložené checklisty.'
     : cfg.clientId ? 'Nepřihlášeno.' : 'Nenastaveno – vlož ID aplikace z registrace v Microsoft Entra (postup v README).';
@@ -997,8 +1046,12 @@ function renderAbout() {
   app.append(h('div', { class: 'card' },
     h('p', null, `Verze ${APP_VERSION}. Aplikace funguje i bez internetu. Seznam objektů a rozpracované checklisty jsou uložené jen v tomto telefonu.`),
     h('p', { class: 'muted' }, 'Na plochu ji přidáš v Safari: Sdílet › Přidat na plochu.'),
+    h('p', { class: 'muted' }, 'Při každém Synchronizovat se všechny checklisty (i rozpracované) zálohují do OneDrive › '
+      + `${OD_DIR} › zalohy (soubor pro každý den v týdnu, 7 dní zpět). `
+      + (lastBackup ? `Poslední záloha do OneDrive: ${new Date(lastBackup).toLocaleString('cs-CZ')}.` : 'Do OneDrive zatím nezálohováno.')),
     h('div', { class: 'row' },
       h('button', { class: 'btn', type: 'button', onclick: backup }, 'Záloha všech checklistů'),
+      h('button', { class: 'btn', type: 'button', onclick: () => filePicker('.json,application/json', restoreBackup) }, 'Obnovit ze zálohy'),
       h('button', { class: 'btn danger', type: 'button', onclick: () => {
         if (!confirm('Smazat všechny uložené checklisty (rozpracované i uložené) z telefonu?')) return;
         drafts = {}; saveDrafts(true); toast('Smazáno.'); location.hash = '#/';
@@ -1083,11 +1136,45 @@ async function uploadDraft(draft) {
   draft.stav = 'ulozeno'; draft.ulozeno = draft.ulozeno || new Date().toISOString(); draft.nahrano = draft.zmeneno;
   drafts[draft.id] = draft; saveDrafts(true);
 }
+/* Záloha všech checklistů (i rozpracovaných) při každé synchronizaci: OneDrive › Revize_telefon › zalohy.
+   Jeden soubor na den v týdnu – přepisuje se během dne, starší dny zůstávají (7 dní zpět, bez mazání). */
+const ZALOHA_DNY = ['nedele', 'pondeli', 'utery', 'streda', 'ctvrtek', 'patek', 'sobota'];
+function backupJson() {
+  return JSON.stringify({ schema: 'revize-pwa-zaloha-1', vytvoreno: new Date().toISOString(), aplikace: APP_VERSION, koncepty: drafts });
+}
+async function backupToOneDrive() {
+  if (!Object.keys(drafts).length) return false;
+  const day = new Date().getDay();
+  await od.upload(`${OD_DIR}/zalohy/zaloha_${day || 7}_${ZALOHA_DNY[day]}.json`, backupJson());
+  store.set('revize.zaloha', new Date().toISOString());
+  return true;
+}
+/* Obnova ze zálohy: doplní chybějící checklisty a nahradí jen ty, které jsou v záloze novější. */
+function restoreBackup(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (data.schema !== 'revize-pwa-zaloha-1' || !data.koncepty || typeof data.koncepty !== 'object') throw new Error('soubor není záloha checklistů');
+      const incoming = Object.values(data.koncepty).filter(d => d && typeof d.id === 'string' && typeof d.zmeneno === 'string' && d.stavy);
+      const take = incoming.filter(d => !drafts[d.id] || d.zmeneno > drafts[d.id].zmeneno);
+      if (!take.length) { toast('Záloha neobsahuje nic nového – checklisty v telefonu jsou stejné nebo novější.', 6000); return; }
+      const added = take.filter(d => !drafts[d.id]).length;
+      if (!confirm(`Obnovit ze zálohy ${take.length} checklistů?\n\nNové: ${added}, novější než v telefonu: ${take.length - added}.\nNovější checklisty v telefonu zůstanou beze změny.`)) return;
+      for (const d of take) drafts[d.id] = ensureDraft(d);
+      saveDrafts(true); toast(`Obnoveno ze zálohy: ${take.length}.`); location.hash = '#/';
+    } catch (e) { toast('Zálohu nelze načíst: ' + e.message, 6000); }
+  };
+  reader.readAsText(file);
+}
 async function syncOneDrive() {
   if (syncOneDrive.running) return;
   syncOneDrive.running = true;
   try {
     toast('Synchronizuji s OneDrive…', 20000);
+    let backup = '';
+    try { if (await backupToOneDrive()) backup = ' Záloha uložena.'; }
+    catch (e) { backup = ` Zálohu se nepodařilo uložit (${e.message}).`; }
     let sent = 0, skipped = 0;
     for (const draft of Object.values(drafts)) {
       if (draft.stav !== 'ulozeno' || draft.nahrano === draft.zmeneno) continue;
@@ -1101,7 +1188,7 @@ async function syncOneDrive() {
       seznam.od_zmeneno = remote.meta.lastModifiedDateTime; await saveSeznam();
       got = ` Nový seznam: ${seznam.polozky.length} objektů.`;
     }
-    toast(`Odesláno ${sent} checklistů.${skipped ? ` ${skipped} neúplných zůstalo v telefonu.` : ''}${got || ' Seznam je aktuální.'}`, 6000);
+    toast(`Odesláno ${sent} checklistů.${skipped ? ` ${skipped} neúplných zůstalo v telefonu.` : ''}${got || ' Seznam je aktuální.'}${backup}`, 6000);
     if (!location.hash || location.hash === '#/') renderList();
   } catch (e) { toast(e.message, 7000); }
   finally { syncOneDrive.running = false; }
@@ -1109,10 +1196,27 @@ async function syncOneDrive() {
 
 /* ------------------------------------------------------------------ start */
 function updateOnline() { document.getElementById('offline').hidden = navigator.onLine; }
+// CSP (index.html) – když zablokuje adresu, kterou OneDrive použije, ať je to vidět (a dá se doplnit).
+document.addEventListener('securitypolicyviolation', e => {
+  let host = e.blockedURI; try { host = new URL(e.blockedURI).host; } catch (err) { /* inline apod. */ }
+  toast(`Bezpečnostní pravidlo zablokovalo „${host}“ (${e.violatedDirective}). Napiš to do programu.`, 9000);
+});
+document.getElementById('neodeslano').addEventListener('click', () => {
+  if (!location.hash || location.hash === '#/') route(); else location.hash = '#/';
+  window.scrollTo(0, 0);
+});
 window.addEventListener('online', updateOnline); window.addEventListener('offline', updateOnline);
 updateOnline();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // Aplikace startuje z uložené kopie; nová verze se stáhne na pozadí a převezme se při dalším otevření.
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController) toast('Nová verze aplikace je stažená – zavři aplikaci a otevři ji znovu.', 9000);
+  });
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    // iPhone aplikaci z pozadí jen probudí (bez nového načtení) – zkontroluj novou verzi i tehdy.
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+  }).catch(() => {});
 }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 window.revize = { build, validate, newDraft, ensureDraft, icoOk, applyList, drafts: () => drafts, seznam: () => seznam };  // pro kontrolu a testy

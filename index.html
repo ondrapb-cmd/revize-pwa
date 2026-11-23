@@ -2,6 +2,10 @@
 <html lang="cs">
 <head>
 <meta charset="utf-8">
+<!-- CSP: jen vlastní soubory; síť jen Microsoft přihlášení, Graph a úložiště OneDrive (stahování seznamu
+     přesměruje Graph na doménu datacentra – osobní účet *.1drv.com / *.microsoftpersonalcontent.com,
+     firemní *.sharepoint.com). Inline styly jsou nutné (aplikace nastavuje atribut style). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; manifest-src 'self'; worker-src 'self'; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://*.1drv.com https://*.microsoftpersonalcontent.com https://*.livefilestore.com https://*.sharepoint.com https://*.svc.ms https://*.onedrive.com; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#16263e">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -20,6 +24,7 @@
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
   <h1 id="title">Revize</h1>
+  <button id="neodeslano" class="pill warn" type="button" hidden></button>
   <span id="offline" class="pill" hidden>offline</span>
 </header>
 <main id="app" aria-live="polite"></main>

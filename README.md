@@ -31,6 +31,35 @@ checklist (2 soubory naráz). Export z PC ho přibere automaticky, i když jeho 
 v lhůtníku se zaškrtnutím vchodu přidá do dávky také. U objektu se zobrazují jen části, které má
 (ostatní jsou „Netýká se“), a tlačítko **Zbývající části beze změn** vyřeší zbytek jedním klepnutím.
 
+## Ukazatel neodeslaných checklistů (1.2.3)
+
+- V záhlaví každé obrazovky svítí červeně **„N neodesl.“**, dokud v telefonu zůstává checklist,
+  který ještě neodešel. Klepnutím se vrátíš na seznam.
+- Na seznamu objektů je nahoře karta **Neodesláno**: kolik checklistů je rozpracovaných nebo změněných
+  po uložení (jsou **jen v tomto telefonu**), kolik uložených čeká na odeslání do OneDrive (při propojení,
+  s tlačítkem **Odeslat nyní**) a jak starý je nejstarší z nich (od 2 dnů).
+- Štítky u checklistů: *rozpracováno*, *změněno po uložení*, *čeká na odeslání*, *uloženo*, *v OneDrive*.
+
+## Rychlý start i při slabém signálu (1.2.5)
+
+- Aplikace se otevírá **vždy z kopie v telefonu** – okamžitě, i ve sklepě s jednou čárkou signálu,
+  kdy síť „visí“. Dřív čekala na síť, než to vzdala.
+- Novou verzi si stáhne na pozadí (při otevření i při návratu do aplikace) a ohlásí
+  **„Nová verze aplikace je stažená – zavři aplikaci a otevři ji znovu.“** Teprve pak se použije.
+- Nová verze se stahuje celá najednou mimo mezipaměť prohlížeče, takže se nesmíchají soubory dvou verzí.
+
+## Záloha do OneDrive a bezpečnostní pravidla (1.2.4)
+
+- Každé **Synchronizovat** nejdřív uloží zálohu všech checklistů (i rozpracovaných) do
+  `OneDrive › Revize_telefon › zalohy › zaloha_<den>.json` – jeden soubor pro každý den v týdnu,
+  takže je k dispozici 7 dní zpět. Program na PC zálohy nečte.
+- **O aplikaci › Obnovit ze zálohy:** doplní chybějící checklisty a nahradí jen ty, které jsou v záloze
+  novější. Funguje i se zálohou z tlačítka Záloha všech checklistů.
+- Aplikace má **CSP** (pravidlo v `index.html`): smí stahovat jen vlastní soubory a mluvit jen
+  s přihlášením Microsoft, Graph API a úložištěm OneDrive. Kdyby pravidlo něco zablokovalo,
+  aplikace ukáže hlášení „Bezpečnostní pravidlo zablokovalo …“ – název adresy pošli k doplnění.
+- Část „pro celý dům“, kterou už odeslal jiný vchod a od té doby se nezměnila, se znovu neodesílá.
+
 ## Výměna s PC přes OneDrive (složka `OneDrive\Revize_telefon`)
 
 - **PC → telefon:** Lhůtník › Export pro telefon uloží seznam vždy i jako `Revize_telefon\seznam.json`.
