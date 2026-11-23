@@ -1,7 +1,7 @@
 {
-  "name": "Revize – terénní checklist",
+  "name": "Revize",
   "short_name": "Revize",
-  "description": "Checklist požární revize CL-A4-02 pro iPhone, funguje i offline.",
+  "description": "Soukromá aplikace.",
   "lang": "cs",
   "start_url": "./",
   "scope": "./",

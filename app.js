@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.2.7';
+const APP_VERSION = '1.2.9';
 const ROLES = [
   ['po', 'A – Preventivní prohlídka PO'], ['php', 'B – Hasicí přístroje'], ['hydranty', 'B2 – Hydranty'],
   ['pozarni_dvere', 'C – Požární uzávěry'], ['nouzove_osvetleni', 'C – Nouzové osvětlení'], ['ucpavky', 'C – Ucpávky'],
@@ -1079,7 +1079,7 @@ function renderAbout() {
   const lastBackup = store.get('revize.zaloha', '');
   const cfg = od.cfg();
   const status = od.connected() ? 'Propojeno – Synchronizovat stáhne seznam a odešle uložené checklisty.'
-    : cfg.clientId ? 'Nepřihlášeno.' : 'Nenastaveno – vlož ID aplikace z registrace v Microsoft Entra (postup v README).';
+    : cfg.clientId ? 'Nepřihlášeno.' : 'Nenastaveno – vlož ID aplikace z registrace v Microsoft Entra (postup v návodu na PC).';
   app.append(h('div', { class: 'card' },
     h('div', { style: 'font-weight:650' }, 'OneDrive – automatická výměna s PC'),
     h('p', { class: 'muted' }, `Složka OneDrive › ${OD_DIR}: seznam.json (z PC) a checklisty (z telefonu). ${status}`),
