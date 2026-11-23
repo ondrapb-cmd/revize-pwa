@@ -7,6 +7,17 @@ Adresa aplikace: **https://ondrapb-cmd.github.io/revize-pwa/**
 - Funguje offline (service worker). Seznam objektů i rozpracované checklisty jsou jen v telefonu.
 - Přes telefon se řeší jednodušší objekty; ostatní objekty odeber ze seznamu červeným **✕**.
 
+## Automatické odeslání do OneDrive (1.2.7)
+
+- Při propojení s OneDrive (O aplikaci) se úplný checklist po **Zkontrolovat a uložit JSON** odešle sám
+  do `OneDrive › Revize_telefon › checklisty`. Není potřeba nic ukládat ani přesouvat.
+- Bez signálu počká ve frontě (červené „N neodesl.“) a odejde sám, jakmile se objeví síť,
+  při dalším otevření aplikace nebo při návratu do ní (a každých 5 minut, když je aplikace otevřená).
+- Když vyprší přihlášení (zhruba po dni), karta **Neodesláno** nabídne **Přihlásit k OneDrive** –
+  po přihlášení se čekající checklisty odešlou samy.
+- Jednou denně se při automatickém odeslání uloží i záloha všech checklistů.
+- **Uložit / sdílet** a **Stáhnout** zůstávají jako záloha (bez propojení s OneDrive je to jediná cesta).
+
 ## Novinky ve verzi 1.2.0
 
 - **Kontrola PO po řádcích:** sekce A ukazuje řádky protokolu (Osvětlení, Průchodnost chodby, Úklid…)
@@ -127,8 +138,9 @@ Aplikace se přihlásí tvým účtem Microsoft a smí jen číst a zapisovat so
 
 ### Uložení (telefon → PC)
 
-1. **Odeslat do OneDrive** (při propojení), jinak **Uložit / sdílet › Uložit do Souborů › OneDrive › Revize_telefon › checklisty**.
-2. Když „Uložit do Souborů“ chybí: **Stáhnout** → soubor je v Soubory › Stažené, odtud ho přesuň do OneDrive.
+- **Při propojení s OneDrive:** nic – po *Zkontrolovat a uložit JSON* se checklist odešle sám (bez signálu později).
+- Bez propojení: **Uložit / sdílet › Uložit do Souborů › OneDrive › Revize_telefon › checklisty**;
+  když „Uložit do Souborů“ chybí: **Stáhnout** → Soubory › Stažené, odtud přesunout do OneDrive.
 
 ### Zpracování na PC
 

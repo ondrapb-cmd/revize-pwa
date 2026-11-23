@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.2.6';
+const APP_VERSION = '1.2.7';
 const ROLES = [
   ['po', 'A – Preventivní prohlídka PO'], ['php', 'B – Hasicí přístroje'], ['hydranty', 'B2 – Hydranty'],
   ['pozarni_dvere', 'C – Požární uzávěry'], ['nouzove_osvetleni', 'C – Nouzové osvětlení'], ['ucpavky', 'C – Ucpávky'],
@@ -95,7 +95,9 @@ function saveDrafts(now) {
 function unsentInfo() {
   const all = Object.values(drafts);
   const jenTelefon = all.filter(d => d.stav !== 'ulozeno');
-  const cekaOd = typeof od !== 'undefined' && od.connected() ? all.filter(d => d.stav === 'ulozeno' && d.nahrano !== d.zmeneno) : [];
+  // Při nastaveném OneDrive se uložené checklisty odesílají samy – dokud neodejdou, počítají se jako neodeslané
+  // (i když mezitím vypršelo přihlášení).
+  const cekaOd = typeof od !== 'undefined' && od.configured() ? all.filter(d => d.stav === 'ulozeno' && d.nahrano !== d.zmeneno) : [];
   const nejstarsi = [...jenTelefon, ...cekaOd].map(d => d.zmeneno || '').filter(Boolean).sort()[0] || '';
   return { jenTelefon, cekaOd, celkem: jenTelefon.length + cekaOd.length, nejstarsi };
 }
@@ -473,7 +475,7 @@ function draftBadge(draft) {
   if (!draft) return null;
   if (draft.stav === 'ulozeno') {
     if (draft.nahrano === draft.zmeneno) return h('span', { class: 'badge done' }, 'v OneDrive');
-    return od.connected() ? h('span', { class: 'badge draft' }, 'čeká na odeslání') : h('span', { class: 'badge done' }, 'uloženo');
+    return od.configured() ? h('span', { class: 'badge draft' }, 'čeká na odeslání') : h('span', { class: 'badge done' }, 'uloženo');
   }
   return h('span', { class: 'badge draft' }, draft.stav === 'zmeneno' ? 'změněno po uložení' : 'rozpracováno');
 }
@@ -488,12 +490,16 @@ function unsentBanner() {
       ? '1 rozpracovaný nebo změněný – je jen v tomto telefonu. '
       : `${info.jenTelefon.length} ${info.jenTelefon.length < 5 ? 'rozpracované nebo změněné' : 'rozpracovaných nebo změněných'} – jsou jen v tomto telefonu. `,
       h('span', { class: 'muted' }, 'Dokonči je tlačítkem „Zkontrolovat a uložit JSON“.')) : null,
-    info.cekaOd.length ? h('p', { style: 'margin:6px 0 0' }, info.cekaOd.length === 1
-      ? '1 uložený čeká na odeslání do OneDrive.'
-      : `${info.cekaOd.length} ${info.cekaOd.length < 5 ? 'uložené čekají' : 'uložených čeká'} na odeslání do OneDrive.`) : null,
+    info.cekaOd.length ? h('p', { style: 'margin:6px 0 0' }, (info.cekaOd.length === 1
+      ? '1 uložený čeká na odeslání do OneDrive'
+      : `${info.cekaOd.length} ${info.cekaOd.length < 5 ? 'uložené čekají' : 'uložených čeká'} na odeslání do OneDrive`)
+      + (od.connected() ? ' – odešle se sám, jakmile bude signál.' : '.')) : null,
+    info.cekaOd.length && !od.connected() ? h('p', { style: 'margin:6px 0 0;font-weight:650' },
+      'Přihlášení k OneDrive vypršelo – po přihlášení se checklisty odešlou samy.') : null,
     old >= 2 ? h('p', { style: 'margin:6px 0 0;font-weight:650' }, `Nejstarší neodeslaný je ${old} dní starý.`) : null,
-    info.cekaOd.length ? h('div', { class: 'row', style: 'margin-top:8px' },
-      h('button', { class: 'btn primary', type: 'button', onclick: syncOneDrive }, 'Odeslat nyní')) : null);
+    info.cekaOd.length ? h('div', { class: 'row', style: 'margin-top:8px' }, od.connected()
+      ? h('button', { class: 'btn primary', type: 'button', onclick: syncOneDrive }, 'Odeslat nyní')
+      : h('button', { class: 'btn primary', type: 'button', onclick: () => od.login().catch(e => toast(e.message, 6000)) }, 'Přihlásit k OneDrive')) : null);
 }
 
 function renderList() {
@@ -1024,25 +1030,31 @@ function showResult(draft, box) {
   }
   const all = [draft, ...shared];
   const files = all.map(d => ({ draft: d, json: JSON.stringify(build(d), null, 2), name: fileName(d) }));
+  const auto = od.configured();
+  if (auto) {
+    // Úplný checklist se při propojení s OneDrive uloží a odešle sám (bez signálu ve frontě, odejde později).
+    for (const d of all) if (d.stav !== 'ulozeno') { d.stav = 'ulozeno'; d.ulozeno = new Date().toISOString(); drafts[d.id] = d; }
+    saveDrafts(true);
+  }
   const sent = all.every(d => d.nahrano === d.zmeneno);
-  const send = async () => {
-    // Část „pro celý dům“ odeslaná už od jiného vchodu (beze změny od té doby) se znovu neposílá.
-    const todo = all.filter(d => d === draft || d.nahrano !== d.zmeneno);
-    try { for (const d of todo) await uploadDraft(d); toast(`Odesláno do OneDrive › Revize_telefon › checklisty (${todo.length}).`); showResult(draft, box); }
-    catch (e) { toast(e.message, 7000); }
+  const render = () => {
+    const done = all.every(d => d.nahrano === d.zmeneno);
+    box.replaceChildren(h('div', { class: 'card' },
+      h('div', { class: 'ok' }, done ? 'Checklist je úplný a odeslaný do OneDrive.' : 'Checklist je úplný.'),
+      shared.length ? h('p', { class: 'muted' }, `Spolu s ním: ${shared.map(s => s.adresa + ' (celý dům)').join(', ')} – ${files.length} soubory.`) : null,
+      h('p', { class: 'muted' }, auto
+        ? (done ? 'Na PC ho najdeš v Pracovní dávce pod tlačítkem „Z telefonu“.'
+          : od.connected() ? 'Odesílá se do OneDrive automaticky – bez signálu počká a odejde sám, jakmile bude síť.'
+            : 'Odešle se automaticky po přihlášení k OneDrive (O aplikaci › Přihlásit).')
+        : 'Ulož ho do OneDrive › Revize_telefon › checklisty (nebo propoj aplikaci s OneDrive v O aplikaci – pak se checklisty odesílají samy).'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn grow' + (auto ? '' : ' primary'), type: 'button', onclick: () => shareJson(files) }, 'Uložit / sdílet'),
+        h('button', { class: 'btn', type: 'button', onclick: () => files.forEach(downloadJson) }, 'Stáhnout')),
+      h('details', { style: 'margin-top:10px' }, h('summary', { class: 'muted' }, 'Zobrazit JSON'), files.map(f => h('pre', null, f.json)))));
   };
-  box.replaceChildren(h('div', { class: 'card' },
-    h('div', { class: 'ok' }, sent ? 'Checklist je úplný a odeslaný do OneDrive.' : 'Checklist je úplný.'),
-    shared.length ? h('p', { class: 'muted' }, `Spolu s ním: ${shared.map(s => s.adresa + ' (celý dům)').join(', ')} – ${files.length} soubory.`) : null,
-    h('p', { class: 'muted' }, od.connected()
-      ? 'Odešli ho do OneDrive. Na PC ho najdeš v Pracovní dávce pod tlačítkem „Z telefonu“.'
-      : 'Ulož ho do OneDrive › Revize_telefon › checklisty. Na PC ho najdeš v Pracovní dávce pod tlačítkem „Z telefonu“.'),
-    h('div', { class: 'row' },
-      od.connected() ? h('button', { class: 'btn primary grow', type: 'button', onclick: send }, 'Odeslat do OneDrive') : null,
-      h('button', { class: 'btn grow' + (od.connected() ? '' : ' primary'), type: 'button', onclick: () => shareJson(files) }, 'Uložit / sdílet'),
-      h('button', { class: 'btn', type: 'button', onclick: () => files.forEach(downloadJson) }, 'Stáhnout')),
-    h('details', { style: 'margin-top:10px' }, h('summary', { class: 'muted' }, 'Zobrazit JSON'), files.map(f => h('pre', null, f.json)))));
+  render();
   box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (auto && !sent) autoSend().then(render);
 }
 function markSaved(draft) { draft.stav = 'ulozeno'; draft.ulozeno = new Date().toISOString(); drafts[draft.id] = draft; saveDrafts(true); toast('Checklist uložen.'); }
 async function shareJson(files) {
@@ -1109,6 +1121,7 @@ const od = {
   cfg() { return store.get('revize.onedrive', { clientId: '', authority: 'common' }); },
   tokens() { return store.get('revize.onedrive.token', null); },
   connected() { return !!(this.cfg().clientId && this.tokens()); },
+  configured() { return !!this.cfg().clientId; },
   redirect() { return location.origin + location.pathname; },
   base() { return `https://login.microsoftonline.com/${this.cfg().authority || 'common'}/oauth2/v2.0`; },
   async login() {
@@ -1202,6 +1215,30 @@ function restoreBackup(file) {
   };
   reader.readAsText(file);
 }
+/* Automatické odeslání uložených checklistů (a jednou denně záloha) – po uložení, při startu, při návratu
+   signálu a při návratu do aplikace. Tiché: chyby jen poznamená (karta Neodesláno ukáže, co zbývá). */
+async function autoSend() {
+  if (autoSend.running || syncOneDrive.running || !od.connected() || !navigator.onLine) return 0;
+  autoSend.running = true;
+  let sent = 0;
+  try {
+    for (const draft of Object.values(drafts)) {
+      if (draft.stav !== 'ulozeno' || draft.nahrano === draft.zmeneno) continue;
+      if (validate(ensureDraft(draft)).length) continue;
+      await uploadDraft(draft); sent++;
+    }
+    const last = store.get('revize.zaloha', '');
+    if (Object.keys(drafts).length && String(last).slice(0, 10) !== todayIso()) await backupToOneDrive().catch(() => {});
+    if (sent) toast(`Automaticky odesláno do OneDrive: ${sent} ${sent === 1 ? 'checklist' : sent < 5 ? 'checklisty' : 'checklistů'}.`);
+  } catch (e) {
+    store.set('revize.autoodeslani', { chyba: e.message, kdy: new Date().toISOString() });
+  } finally {
+    autoSend.running = false;
+    updateUnsent();
+    if (sent && (!location.hash || location.hash === '#/')) renderList();
+  }
+  return sent;
+}
 async function syncOneDrive() {
   if (syncOneDrive.running) return;
   syncOneDrive.running = true;
@@ -1241,6 +1278,9 @@ document.getElementById('neodeslano').addEventListener('click', () => {
   window.scrollTo(0, 0);
 });
 window.addEventListener('online', updateOnline); window.addEventListener('offline', updateOnline);
+window.addEventListener('online', () => autoSend());
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') autoSend(); });
+setInterval(() => { if (document.visibilityState === 'visible') autoSend(); }, 5 * 60 * 1000);
 updateOnline();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   // Aplikace startuje z uložené kopie; nová verze se stáhne na pozadí a převezme se při dalším otevření.
@@ -1255,4 +1295,4 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 window.revize = { build, validate, newDraft, ensureDraft, icoOk, applyList, drafts: () => drafts, seznam: () => seznam };  // pro kontrolu a testy
-loadSeznam().then(() => od.finishLogin()).catch(() => {}).then(route);
+loadSeznam().then(() => od.finishLogin()).catch(() => {}).then(route).then(() => autoSend());
