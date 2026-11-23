@@ -40,6 +40,13 @@ v lhůtníku se zaškrtnutím vchodu přidá do dávky také. U objektu se zobra
   s tlačítkem **Odeslat nyní**) a jak starý je nejstarší z nich (od 2 dnů).
 - Štítky u checklistů: *rozpracováno*, *změněno po uložení*, *čeká na odeslání*, *uloženo*, *v OneDrive*.
 
+## Pravidla z PC (1.2.6)
+
+- Délky textů, formát výrobního čísla `číslo/RR`, roku a měření posílá PC v seznamu (`pravidla`,
+  `pravidla_checklistu.py`) – telefon hlídá totéž co PC. Nově i délku textů (480 znaků, vlastník 350).
+- Pro vývoj: vzorové checklisty v `testy/vzory_checklistu`; po změně `app.js` znovu vygenerovat
+  `telefon_vystup.json` (`generuj_v_prohlizeci.js`, launch „pwa-vzory“) – jinak test na PC selže.
+
 ## Rychlý start i při slabém signálu (1.2.5)
 
 - Aplikace se otevírá **vždy z kopie v telefonu** – okamžitě, i ve sklepě s jednou čárkou signálu,

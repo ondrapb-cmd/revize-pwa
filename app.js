@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.2.5';
+const APP_VERSION = '1.2.6';
 const ROLES = [
   ['po', 'A – Preventivní prohlídka PO'], ['php', 'B – Hasicí přístroje'], ['hydranty', 'B2 – Hydranty'],
   ['pozarni_dvere', 'C – Požární uzávěry'], ['nouzove_osvetleni', 'C – Nouzové osvětlení'], ['ucpavky', 'C – Ucpávky'],
@@ -159,7 +159,14 @@ function phoneHref(phone) {
   return digits.replace(/\D/g, '').length >= 9 ? 'tel:' + digits.split(/[;/,]/)[0] : null;
 }
 function yearOf(draft) { return Number((draft.datum || todayIso()).slice(0, 4)); }
-const NEW_SERIAL = /^[^/\s]+\/\d{2}$/;  // PC čte rok výroby nového PHP z „/XX“
+/* Jednoduchá pravidla (délky textů, formáty) posílá PC v seznam.json („pravidla“, pravidla_checklistu.py);
+   výchozí hodnoty níže platí, dokud seznam pravidla nemá. Logická pravidla jsou ve validate(). */
+const DEFAULT_RULES = {
+  verze: 1, text_max: 480, adresa_max: 240, subjekt_max: 350, radku_pbz_max: 100,
+  vyrobni_cislo_nove: '^[^/\\s]+/\\d{2}$', rok: '^(19|20)\\d\\d$', mereni: '^\\d{1,5}([.,]\\d{1,6})?$',
+};
+function rules() { return Object.assign({}, DEFAULT_RULES, (seznam && seznam.pravidla) || {}); }
+function rx(name) { return new RegExp(rules()[name]); }
 function inventoryOf(draft) {
   if (draft.novy_objekt === true || !draft.zdroj) return null;
   const current = seznam.polozky.find(o => o.id === draft.zdroj.id);
@@ -282,7 +289,7 @@ function validate(draft) {
     if (inv && serialKey && ['TZ', 'OPR', 'VYR', 'VYM'].includes(row.akce) && !known.has(serialKey)) errors.push(`${label}: přístroj není v evidenci objektu – vyber ho v seznamu přístrojů.`);
     if (inv && serialKey && row.akce === 'NOVY' && known.has(serialKey)) errors.push(`${label}: toto výrobní číslo už v evidenci je.`);
     const newSerial = row.akce === 'VYM' ? row.nove_vyrobni_cislo.trim() : row.akce === 'NOVY' ? row.vyrobni_cislo.trim() : '';
-    if (newSerial && !NEW_SERIAL.test(newSerial)) errors.push(`${label}: výrobní číslo nového PHP piš ve tvaru číslo/XX (např. 001234/26).`);
+    if (newSerial && !rx('vyrobni_cislo_nove').test(newSerial)) errors.push(`${label}: výrobní číslo nového PHP piš ve tvaru číslo/XX (např. 001234/26).`);
     if (newSerial && known.has(newSerial.toLowerCase())) errors.push(`${label}: nové výrobní číslo ${newSerial} už v evidenci je.`);
     const key = row.vyrobni_cislo.trim().toLowerCase();
     if (key && row.akce !== 'EVIDENCE') { if (serials.has(key)) errors.push(`${label}: více akcí pro stejné výrobní číslo.`); serials.add(key); }
@@ -300,13 +307,13 @@ function validate(draft) {
       if (!String(row.rok_tz || '').trim()) errors.push(`${label}: chybí rok poslední TZ.`);
     }
     for (const year of ['rok_vyroby', 'rok_tz']) {
-      if (row[year] && !/^(19|20)\d\d$/.test(row[year])) errors.push(`${label}: rok musí být čtyřmístný (např. 2019).`);
+      if (row[year] && !rx('rok').test(row[year])) errors.push(`${label}: rok musí být čtyřmístný (např. 2019).`);
     }
   });
   draft.hyd_mereni.forEach((m, i) => {
     if (!m.umisteni.trim()) errors.push(`B2 – měření ${i + 1}: chybí umístění hydrantu.`);
     if (!MEASURE_KEYS.some(k => String(m[k] || '').trim())) errors.push(`B2 – měření ${i + 1}: zapiš aspoň jednu naměřenou hodnotu.`);
-    for (const k of MEASURE_KEYS) if (String(m[k] || '').trim() && !/^\d{1,5}([.,]\d{1,6})?$/.test(String(m[k]).trim())) errors.push(`B2 – měření ${i + 1}: hodnota „${m[k]}“ musí být číslo (např. 0,45).`);
+    for (const k of MEASURE_KEYS) if (String(m[k] || '').trim() && !rx('mereni').test(String(m[k]).trim())) errors.push(`B2 – měření ${i + 1}: hodnota „${m[k]}“ musí být číslo (např. 0,45).`);
   });
   if (draft.hyd_zavady.length) errors.push('B2 – volný text závad hydrantů program do protokolu nezapíše: odeber ho a závadu zapiš do Závěru (doporučení).');
   for (const role of PBZ) draft.pbz[role].forEach((r, i) => { if (!r.popis.trim()) errors.push(`${ROLE_NAME[role]} ${i + 1}: chybí popis.`); });
@@ -328,7 +335,34 @@ function validate(draft) {
   if (src && src.no && draft.pbz.nouzove_osvetleni.length && noChanged(draft, src).doklad) {
     errors.push('C – Nouzové osvětlení: zapiš závady buď do dokladu, nebo jako změny – ne obojí.');
   }
+  errors.push(...lengthErrors(draft));
   return errors;
+}
+
+/* Délky textů a počty řádků podle pravidel z PC – stejné limity, jaké PC hlídá při převzetí. */
+const FIELD_NAME = { subjekt: 'vlastník', adresa: 'adresa domu', popis: 'popis', umisteni: 'umístění', opatreni: 'opatření',
+  jine: 'D – jiné', poznamka: 'poznámka', vyrobce: 'výrobce', model: 'model', text: 'text', doporuceni: 'doporučení',
+  zjistene: 'zjištěné závady', odstraneni: 'odstranění závad', stav: 'stav svítidla', po_c: 'C', po_d: 'D' };
+function lengthErrors(draft) {
+  const r = rules(), out = [];
+  let built;
+  try { built = build(draft); } catch (e) { return out; }
+  const obj = built.objekty[0];
+  if (built.subjekt.length > r.subjekt_max) out.push(`Vlastník je delší než ${r.subjekt_max} znaků – zkrať ho.`);
+  if (obj.adresa.length > r.adresa_max) out.push(`Adresa domu je delší než ${r.adresa_max} znaků.`);
+  for (const role of PBZ) {
+    if ((obj.pbz_zmeny[role] || []).length > r.radku_pbz_max) out.push(`${ROLE_NAME[role]}: nejvýš ${r.radku_pbz_max} změn.`);
+  }
+  const walk = (value, key) => {
+    if (typeof value === 'string') {
+      if (key !== 'subjekt' && key !== 'adresa' && value.length > r.text_max) {
+        out.push(`Text „${FIELD_NAME[key] || key}“ je delší než ${r.text_max} znaků (${value.length}) – zkrať ho: „${value.slice(0, 40)}…“`);
+      }
+    } else if (Array.isArray(value)) value.forEach(v => walk(v, key));
+    else if (value && typeof value === 'object') Object.entries(value).forEach(([k, v]) => walk(v, k));
+  };
+  walk(obj, '');
+  return out;
 }
 
 function build(draft) {
@@ -416,7 +450,8 @@ function clear() { app.replaceChildren(); document.querySelector('.fab')?.remove
 
 async function applyList(data) {
   if (data.schema !== 'lhutnik-telefon-1' || !Array.isArray(data.objekty)) throw new Error('Soubor není seznam objektů z lhůtníku.');
-  seznam = { vytvoreno: data.vytvoreno || '', nazev: data.nazev || '', polozky: data.objekty, katalog: data.katalog || seznam.katalog || [] };
+  seznam = { vytvoreno: data.vytvoreno || '', nazev: data.nazev || '', polozky: data.objekty, katalog: data.katalog || seznam.katalog || [],
+    pravidla: data.pravidla || seznam.pravidla || null };
   await saveSeznam();
   const extra = ['po', 'hydranty', 'no'].map(k => data.objekty.filter(o => o[k]).length);
   toast(`Načteno ${seznam.polozky.length} objektů (Kontrola PO ${extra[0]}, hydranty ${extra[1]}, NO ${extra[2]}).`, 5000);
