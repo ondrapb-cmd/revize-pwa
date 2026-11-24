@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.2.9';
+const APP_VERSION = '1.3.0';
 const ROLES = [
   ['po', 'A – Preventivní prohlídka PO'], ['php', 'B – Hasicí přístroje'], ['hydranty', 'B2 – Hydranty'],
   ['pozarni_dvere', 'C – Požární uzávěry'], ['nouzove_osvetleni', 'C – Nouzové osvětlení'], ['ucpavky', 'C – Ucpávky'],
@@ -17,7 +17,7 @@ const PBZ = ROLES.slice(3).map(r => r[0]);
 const ROLE_NAME = Object.fromEntries(ROLES);
 const STATES = [['beze_zmen', 'Beze změn'], ['zmeny', 'Změny'], ['netyka_se', 'Netýká se']];
 const PHP_ACTIONS = { TZ: 'Tlaková zkouška', OPR: 'Oprava', VYR: 'Vyřazení', NOVY: 'Nový přístroj', VYM: 'Výměna', EVIDENCE: 'Evidence stávajícího' };
-const DRUHY = ['Práškový', 'Vodní', 'Pěnový', 'Sněhový (CO₂)', 'Jiný'];
+const DRUHY = ['Práškový', 'Vodní', 'Pěnový', 'Sněhový (CO₂)', 'Čisté hasivo', 'Jiný'];
 const FULL_ROW = ['NOVY', 'VYM', 'EVIDENCE'];
 const MEASURE_KEYS = ['tlak_vytok', 'tlak_p1', 'tlak_p2', 'tlak_rozdil', 'prutok'];
 const MEASURE_NAME = { tlak_vytok: 'Tlak na výtoku (MPa)', tlak_p1: 'Tlak P1 (MPa)', tlak_p2: 'Tlak P2 (MPa)', tlak_rozdil: 'Rozdíl P1–P2 (MPa)', prutok: 'Průtok Q (l/s)' };
@@ -35,7 +35,7 @@ const store = {
   },
 };
 /* Seznam objektů s podklady (PHP, Kontrola PO, hydranty, NO) je velký – ukládá se do IndexedDB
-   (localStorage má v Safari jen ~5 MB). Rozpracované checklisty zůstávají v localStorage. */
+   (localStorage má v Safari jen ~5 MB). Rozpracované checklisty jsou v IndexedDB také (klíč koncepty). */
 const idb = {
   db: null,
   open() {
@@ -84,12 +84,35 @@ let drafts = store.get('revize.koncepty', {});
 let skryte = store.get('revize.skryte', {});
 function isHidden(o) { return Object.prototype.hasOwnProperty.call(skryte, o.id) && skryte[o.id] === (o.termin || ''); }
 let saveTimer = null;
+/* Checklisty jsou v IndexedDB (localStorage má v Safari jen ~5 MB a zápis brzdí aplikaci).
+   localStorage je jen záchrana: použije se, když IndexedDB selže, a smaže se po prvním úspěšném zápisu. */
+async function writeDrafts() {
+  try {
+    await idb.set('koncepty', drafts);
+    localStorage.removeItem('revize.koncepty');
+  } catch (e) {
+    store.set('revize.koncepty', drafts);
+  }
+}
 function saveDrafts(now) {
   clearTimeout(saveTimer);
   updateUnsent();
-  if (now) { store.set('revize.koncepty', drafts); return; }
-  saveTimer = setTimeout(() => store.set('revize.koncepty', drafts), 300);
+  if (now) { writeDrafts(); return; }
+  saveTimer = setTimeout(writeDrafts, 300);
 }
+async function loadDrafts() {
+  // Sloučení: novější verze každého checklistu vyhrává (localStorage existuje jen po selhání IndexedDB).
+  const fromLs = store.get('revize.koncepty', {});
+  let fromDb = null;
+  try { fromDb = await idb.get('koncepty'); } catch (e) { fromDb = null; }
+  const merged = Object.assign({}, fromDb || {});
+  for (const [id, d] of Object.entries(fromLs)) {
+    if (!merged[id] || String(d.zmeneno || '') > String(merged[id].zmeneno || '')) merged[id] = d;
+  }
+  drafts = merged;
+  if (Object.keys(fromLs).length) await writeDrafts();   // převod starých checklistů do IndexedDB
+}
+window.addEventListener('pagehide', () => { if (saveTimer) { clearTimeout(saveTimer); writeDrafts(); } });
 /* Neodeslané checklisty: „jen v telefonu“ = rozpracované nebo změněné po uložení (při ztrátě telefonu
    / smazání ikony zmizí); „čeká na OneDrive“ = uložené, ale aktuální obsah ještě není v OneDrive. */
 function unsentInfo() {
@@ -1295,4 +1318,4 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 window.revize = { build, validate, newDraft, ensureDraft, icoOk, applyList, drafts: () => drafts, seznam: () => seznam };  // pro kontrolu a testy
-loadSeznam().then(() => od.finishLogin()).catch(() => {}).then(route).then(() => autoSend());
+loadSeznam().then(loadDrafts).then(() => od.finishLogin()).catch(() => {}).then(route).then(() => autoSend());
