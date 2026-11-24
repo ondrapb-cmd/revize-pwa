@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const ROLES = [
   ['po', 'A – Preventivní prohlídka PO'], ['php', 'B – Hasicí přístroje'], ['hydranty', 'B2 – Hydranty'],
   ['pozarni_dvere', 'C – Požární uzávěry'], ['nouzove_osvetleni', 'C – Nouzové osvětlení'], ['ucpavky', 'C – Ucpávky'],
@@ -179,10 +179,14 @@ function icoOk(ico) {
   const mod = 11 - (weighted % 11);
   return (mod === 10 ? 0 : mod === 11 ? 1 : mod) === Number(ico[7]);
 }
-function phoneHref(phone) {
-  const digits = String(phone || '').replace(/[^\d+]/g, '');
-  return digits.replace(/\D/g, '').length >= 9 ? 'tel:' + digits.split(/[;/,]/)[0] : null;
+function phoneNumber(phone) {
+  // Více čísel („721 778 361; 602 …“) → první z nich.
+  const digits = String(phone || '').split(/[;/,]/)[0].replace(/[^\d+]/g, '');
+  return digits.replace(/\D/g, '').length >= 9 ? digits : null;
 }
+function phoneHref(phone) { const n = phoneNumber(phone); return n ? 'tel:' + n : null; }
+// SMS otevře aplikaci Zprávy s předvyplněným příjemcem; text napíše a odešle uživatel.
+function smsHref(phone) { const n = phoneNumber(phone); return n ? 'sms:' + n : null; }
 function yearOf(draft) { return Number((draft.datum || todayIso()).slice(0, 4)); }
 /* Jednoduchá pravidla (délky textů, formáty) posílá PC v seznam.json („pravidla“, pravidla_checklistu.py);
    výchozí hodnoty níže platí, dokud seznam pravidla nemá. Logická pravidla jsou ve validate(). */
@@ -232,7 +236,26 @@ function ensureDraft(draft) {
   if (!('hyd_zaver' in draft)) draft.hyd_zaver = null;
   if (!('no_doklad' in draft)) draft.no_doklad = null;
   draft.no_stavy = draft.no_stavy || {};    // řádek seznamu NO → stav
+  draft.php_opravy = draft.php_opravy || {};  // výrobní číslo (malými) → opravené údaje stávajícího PHP
   return draft;
+}
+/* Oprava údajů stávajících PHP: posílá se jen to, co se oproti evidenci změnilo (+ původní hodnoty pro kontrolu na PC). */
+const PHP_FIX_FIELDS = [['umisteni', 'Umístění'], ['druh', 'Druh'], ['vyrobce', 'Výrobce'], ['model', 'Typ / model'],
+  ['vyrobni_cislo', 'Výrobní číslo (rok výroby za lomítkem, např. 049176/18)']];
+function phpFixes(draft) {
+  const inv = inventoryOf(draft), out = [];
+  if (!inv || !draft.php_opravy) return out;
+  for (const unit of inv.pristroje) {
+    const edit = draft.php_opravy[unit.vyrobni_cislo.trim().toLowerCase()];
+    if (!edit) continue;
+    const puvodni = {}, nove = {};
+    for (const [key] of PHP_FIX_FIELDS) {
+      const before = String(unit[key] ?? '').trim(), after = String(edit[key] ?? '').trim().replace(/\s+/g, ' ');
+      if (after !== before) { puvodni[key] = before; nove[key] = after; }
+    }
+    if (Object.keys(nove).length) out.push({ vyrobni_cislo: unit.vyrobni_cislo, puvodni, nove });
+  }
+  return out;
 }
 function sourceOf(draft) {
   return (draft.zdroj && seznam.polozky.find(o => o.id === draft.zdroj.id)) || draft.zdroj || null;
@@ -281,7 +304,7 @@ function poValues(draft) {
 function roleValues(draft, role) {
   const src = sourceOf(draft);
   if (role === 'po') return poValues(draft);
-  if (role === 'php') return draft.php.length > 0;
+  if (role === 'php') return draft.php.length > 0 || phpFixes(draft).length > 0;
   if (role === 'hydranty') return draft.hyd_zavady.length > 0 || zaverChanged(draft, src);
   if (role === 'nouzove_osvetleni') { const n = noChanged(draft, src); if (n.doklad || n.stavy.length) return true; }
   return draft.pbz[role].length > 0;
@@ -335,6 +358,21 @@ function validate(draft) {
       if (row[year] && !rx('rok').test(row[year])) errors.push(`${label}: rok musí být čtyřmístný (např. 2019).`);
     }
   });
+  const fixedSerials = new Set();
+  for (const fix of phpFixes(draft)) {
+    const label = `B – oprava údajů ${fix.vyrobni_cislo}`;
+    for (const key of ['vyrobni_cislo', 'druh']) if (key in fix.nove && !fix.nove[key]) errors.push(`${label}: ${key === 'druh' ? 'druh' : 'výrobní číslo'} nesmí být prázdné.`);
+    const serial = fix.nove.vyrobni_cislo;
+    if (!serial) continue;
+    const k = serial.toLowerCase();
+    if ((known.has(k) && k !== fix.vyrobni_cislo.trim().toLowerCase()) || fixedSerials.has(k)) errors.push(`${label}: výrobní číslo ${serial} už má jiný přístroj.`);
+    fixedSerials.add(k);
+    const yy = serial.match(/\/(\d{2})$/);
+    if (yy) {
+      const made = Number(yy[1]) <= 68 ? 2000 + Number(yy[1]) : 1900 + Number(yy[1]);
+      if (made > yearOf(draft)) errors.push(`${label}: rok výroby ${made} za lomítkem je v budoucnosti.`);
+    }
+  }
   draft.hyd_mereni.forEach((m, i) => {
     if (!m.umisteni.trim()) errors.push(`B2 – měření ${i + 1}: chybí umístění hydrantu.`);
     if (!MEASURE_KEYS.some(k => String(m[k] || '').trim())) errors.push(`B2 – měření ${i + 1}: zapiš aspoň jednu naměřenou hodnotu.`);
@@ -431,6 +469,8 @@ function build(draft) {
   const lines = list => (list || []).map(text).filter(Boolean);
   const rowsA = changedRowsA(draft, src);
   if (rowsA.length) object.po_a = rowsA;
+  const fixes = phpFixes(draft);
+  if (fixes.length) object.php_opravy = fixes;
   if (src && src.po && draft.po_c !== null && !sameList(draft.po_c, src.po.c)) object.po_c = lines(draft.po_c);
   if (src && src.po && draft.po_d !== null && !sameList(draft.po_d, src.po.d)) object.po_d = lines(draft.po_d);
   if (zaverChanged(draft, src)) {
@@ -582,7 +622,8 @@ function renderList() {
           showHidden
             ? h('button', { class: 'btn grow', type: 'button', onclick: () => { delete skryte[o.id]; store.set('revize.skryte', skryte); fill(); } }, 'Vrátit do seznamu')
             : h('button', { class: 'btn primary grow', type: 'button', onclick: () => openDraft(o) }, draft ? 'Pokračovat v checklistu' : 'Nový checklist'),
-          tel ? h('a', { class: 'btn', href: tel }, 'Volat') : null));
+          tel ? h('a', { class: 'btn', href: tel }, 'Volat') : null,
+          tel ? h('a', { class: 'btn', href: smsHref(o.telefon) }, 'SMS') : null));
     }));
     if (!items.length && seznam.polozky.length) listBox.append(h('p', { class: 'muted' }, showHidden ? 'Žádné odebrané objekty.' : 'Nic neodpovídá filtru.'));
     if (items.length > 300) listBox.append(h('p', { class: 'muted' }, `Zobrazeno prvních 300 z ${items.length} – upřesni hledání.`));
@@ -1036,9 +1077,24 @@ function phpInventory(draft, inv, rerender) {
           h('select', { onchange: e => { row.druh = e.target.value; touch(draft); } }, [h('option', { value: '' }, '— vyber —'), ...DRUHY.map(d => h('option', { value: d, selected: d === row.druh }, d))])),
         h('div', { class: 'grid2' }, field('Výrobce', row, 'vyrobce', draft, { required: true }), field('Model / typ', row, 'model', draft, { required: true })),
         field('Umístění', row, 'umisteni', draft, { required: true })) : null,
-      (row && (row.akce === 'TZ' || row.akce === 'OPR')) ? h('p', { class: 'muted', style: 'margin:4px 0 0' }, `Provedeno v roce kontroly (${year}).`) : null));
+      (row && (row.akce === 'TZ' || row.akce === 'OPR')) ? h('p', { class: 'muted', style: 'margin:4px 0 0' }, `Provedeno v roce kontroly (${year}).`) : null,
+      unit.auto === 'vyrazen' ? null : phpFixEditor(draft, unit, key, rerender)));
   }
   return box;
+}
+function phpFixEditor(draft, unit, key, rerender) {
+  const edit = draft.php_opravy[key];
+  if (!edit) {
+    return h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'btn small', type: 'button', onclick: () => {
+      draft.php_opravy[key] = Object.fromEntries(PHP_FIX_FIELDS.map(([k]) => [k, String(unit[k] ?? '')]));
+      touch(draft); rerender();
+    } }, 'Opravit údaje'));
+  }
+  const markChanged = () => { if (draft.stavy.php !== 'zmeny' && phpFixes(draft).length) draft.stavy.php = 'zmeny'; };
+  return h('div', { style: 'margin-top:8px' },
+    h('p', { class: 'muted', style: 'margin:0 0 4px' }, 'Oprava údajů v letošní tabulce PHP. Rok TZ se počítá sám.'),
+    PHP_FIX_FIELDS.map(([k, label]) => field(label, edit, k, draft, { caps: k === 'vyrobni_cislo' ? 'none' : 'sentences', onchange: markChanged })),
+    h('button', { class: 'btn small', type: 'button', onclick: () => { delete draft.php_opravy[key]; touch(draft); rerender(); } }, 'Zrušit opravu'));
 }
 
 function showResult(draft, box) {
