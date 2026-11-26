@@ -5,7 +5,7 @@
  * čeká na síť nejvýš SIT_LIMIT ms. Při nové verzi stačí zvýšit CACHE – nová verze se stáhne
  * celá najednou (mimo mezipaměť prohlížeče) a aplikace ohlásí, že ji stačí zavřít a otevřít.
  */
-const CACHE = 'revize-pwa-1.4.0';
+const CACHE = 'revize-pwa-1.5.0';
 const FILES = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest',
   './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png'];
 const SIT_LIMIT = 3000;

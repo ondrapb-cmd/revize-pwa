@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const ROLES = [
   ['po', 'A – Preventivní prohlídka PO'], ['php', 'B – Hasicí přístroje'], ['hydranty', 'B2 – Hydranty'],
   ['pozarni_dvere', 'C – Požární uzávěry'], ['nouzove_osvetleni', 'C – Nouzové osvětlení'], ['ucpavky', 'C – Ucpávky'],
@@ -303,6 +303,13 @@ function poValues(draft) {
 }
 function roleValues(draft, role) {
   const src = sourceOf(draft);
+  const npred = novyPred(draft);
+  if (npred) {   // nový objekt: formulář podle předlohy je sám zápisem změn
+    // (formulář vzniká jen u části ve stavu Změny; u „Netýká se“ se nic nezapíše)
+    if ((role === 'po' && npred.po) || (role === 'hydranty' && npred.hydranty) || (PBZ.includes(role) && npred.pbz[role])) {
+      return draft.stavy[role] === 'zmeny';
+    }
+  }
   if (role === 'po') return poValues(draft);
   if (role === 'php') return draft.php.length > 0 || phpFixes(draft).length > 0;
   if (role === 'hydranty') return draft.hyd_zavady.length > 0 || zaverChanged(draft, src);
@@ -317,6 +324,11 @@ function validate(draft) {
   if (!draft.subjekt.trim()) errors.push('Vyplň vlastníka (název SVJ / BD / firmy).');
   if (draft.ico.trim() && !icoOk(draft.ico.trim())) errors.push('IČO nemá platnou kontrolní číslici – oprav ho nebo nech prázdné.');
   if (typeof draft.novy_objekt !== 'boolean') errors.push('Zvol, zda jde o stávající, nebo nový objekt.');
+  // Formulář podle předlohy potřebuje Kontrola PO, hydranty a PBZ; samotné hasicí přístroje ne.
+  if (draft.novy_objekt === true && novyData() && (novyData().spravci || []).length && !novyPred(draft)
+      && ['po', 'hydranty', ...PBZ].some(role => draft.stavy[role] === 'zmeny')) errors.push('Nový objekt: vyber správce (předlohu protokolů).');
+  const nparts = novyParts(draft);
+  if (nparts) errors.push(...nparts.errors);
   for (const [role, name] of ROLES) {
     const state = draft.stavy[role];
     if (state === 'nejasne') { errors.push(`${name}: zvol Beze změn / Změny / Netýká se.`); continue; }
@@ -471,6 +483,18 @@ function build(draft) {
   if (rowsA.length) object.po_a = rowsA;
   const fixes = phpFixes(draft);
   if (fixes.length) object.php_opravy = fixes;
+  const nparts = novyParts(draft);
+  if (nparts) {   // nový objekt: stejný tvar jako formulář na PC (qt_novy_objekt.checklist)
+    const o = nparts.obj;
+    if (o.blok) {
+      object.prohlidka_po = { minule_zavady_odstraneny: null, nove_zavady: [], otazky: {}, blok: o.blok };
+      object.zavady_d = { chybi_php: null, chybi_bezpecnostni_znaceni: null, jine: '' };
+    }
+    if (o.hydranty_formular) { object.hydranty_mereni = o.hydranty_mereni; object.hydranty_formular = o.hydranty_formular; object.hydranty_zavady = []; }
+    if (o.pbz_formular) { object.pbz_formular = o.pbz_formular; for (const role of Object.keys(o.pbz_formular)) object.pbz_zmeny[role] = []; }
+    if (o.no_seznam_novy) object.no_seznam_novy = o.no_seznam_novy;
+    if (o.ucpavky_seznam_novy) object.ucpavky_seznam_novy = o.ucpavky_seznam_novy;
+  }
   if (src && src.po && draft.po_c !== null && !sameList(draft.po_c, src.po.c)) object.po_c = lines(draft.po_c);
   if (src && src.po && draft.po_d !== null && !sameList(draft.po_d, src.po.d)) object.po_d = lines(draft.po_d);
   if (zaverChanged(draft, src)) {
@@ -486,6 +510,7 @@ function build(draft) {
   };
   // Podle složky správce zařadí program na PC objekt do správné dávky („Z telefonu“).
   if (src && src.slozka) result.telefon = { id: src.id, slozka: src.slozka, sada: src.sada || '', aplikace: APP_VERSION };
+  else if (nparts) result.telefon = { slozka: nparts.pred.slozka, sada: nparts.pred.sada, aplikace: APP_VERSION };
   return result;
 }
 
@@ -516,7 +541,7 @@ function clear() { app.replaceChildren(); document.querySelector('.fab')?.remove
 async function applyList(data) {
   if (data.schema !== 'lhutnik-telefon-1' || !Array.isArray(data.objekty)) throw new Error('Soubor není seznam objektů z lhůtníku.');
   seznam = { vytvoreno: data.vytvoreno || '', nazev: data.nazev || '', polozky: data.objekty, katalog: data.katalog || seznam.katalog || [],
-    pravidla: data.pravidla || seznam.pravidla || null };
+    pravidla: data.pravidla || seznam.pravidla || null, novy_objekt: data.novy_objekt || seznam.novy_objekt || null };
   await saveSeznam();
   const extra = ['po', 'hydranty', 'no'].map(k => data.objekty.filter(o => o[k]).length);
   toast(`Načteno ${seznam.polozky.length} objektů (Kontrola PO ${extra[0]}, hydranty ${extra[1]}, NO ${extra[2]}).`, 5000);
@@ -607,7 +632,7 @@ function renderList() {
       if (filter === 'tento' && v !== current) return false;
       if (filter === 'pristi' && v !== current + 1) return false;
       if (filter === 'prosle' && !(v && v < current)) return false;
-      return !q || norm(`${o.zakaznik} ${o.adresa} ${o.ico} ${o.osoba}`).includes(q);
+      return !q || norm(`${o.zakaznik} ${o.adresa} ${o.obec || ''} ${o.ico} ${o.osoba}`).includes(q);
     }).sort((a, b) => (monthValue(a.termin) || 0) - (monthValue(b.termin) || 0) || norm(a.adresa).localeCompare(norm(b.adresa)));
     listBox.replaceChildren(...items.slice(0, 300).map(o => {
       const draft = drafts['obj:' + o.id];
@@ -616,7 +641,7 @@ function renderList() {
       return h('div', { class: 'card' + (showHidden ? ' dim' : '') },
         h('div', { class: 'row nowrap' }, h('div', { class: 't grow', style: 'font-weight:650' }, o.adresa), draftBadge(draft),
           showHidden ? null : xButton(`Odebrat ${o.adresa} ze seznamu`, () => hideObject(o))),
-        h('div', { class: 'muted' }, `${o.zkratka || o.zakaznik} · ${o.sada || ''} · termín ${o.termin || '—'}${phpCount ? ` · ${phpCount} PHP` : ''}${o.pro_cely_dum ? ' · pro celý dům (vyplníš i u vchodu)' : ''}`),
+        h('div', { class: 'muted' }, `${o.obec ? o.obec + ' · ' : ''}${o.zkratka || o.zakaznik} · ${o.sada || ''} · termín ${o.termin || '—'}${phpCount ? ` · ${phpCount} PHP` : ''}${o.pro_cely_dum ? ' · pro celý dům (vyplníš i u vchodu)' : ''}`),
         (o.osoba || o.telefon) ? h('div', { class: 'muted' }, [o.osoba, o.telefon].filter(Boolean).join(' · ')) : null,
         h('div', { class: 'row', style: 'margin-top:8px' },
           showHidden
@@ -727,8 +752,12 @@ function sharedStarted(shared) {
 /* Hydranty, nouzové osvětlení a ostatní PBZ – stejné sekce pro objekt i pro „celý dům“ u vchodu. */
 function deviceSections(draft, src, rerender) {
   const out = [];
+  const npred = novyPred(draft);
+  if (npred && npred.hydranty && draft.stavy.hydranty === 'zmeny') {
+    out.push(section(draft, 'hydranty', `B2 – Hydranty – nový objekt (${draft.hyd_mereni.length})`, novyHydEditor(draft, npred, rerender), true));
+  }
   // B2 – hydranty: měření (Příloha 2) a Závěr
-  if (draft.stavy.hydranty === 'zmeny' || draft.stavy.hydranty === 'beze_zmen') {
+  else if (draft.stavy.hydranty === 'zmeny' || draft.stavy.hydranty === 'beze_zmen') {
     const hyd = src && src.hydranty;
     const measured = new Set(draft.hyd_mereni.map(m => norm(m.umisteni) + '|' + norm(m.id)));
     out.push(section(draft, 'hydranty', `B2 – Hydranty – měření (${draft.hyd_mereni.length})`, [
@@ -768,6 +797,7 @@ function deviceSections(draft, src, rerender) {
   // C – ostatní PBZ
   for (const role of PBZ) {
     if (draft.stavy[role] !== 'zmeny') continue;
+    if (npred && npred.pbz[role]) { out.push(section(draft, role, `${ROLE_NAME[role]} – nový objekt`, novyPbzEditor(draft, npred, role, rerender), true)); continue; }
     if (role === 'nouzove_osvetleni' && src && src.no && !draft.pbz[role].length) continue;
     out.push(section(draft, role, `${ROLE_NAME[role]} (${draft.pbz[role].length})`, [
       draft.pbz[role].map((r, i) => h('div', { class: 'item' },
@@ -797,7 +827,9 @@ function renderChecklist(draft) {
       field('IČO vlastníka', draft, 'ico', draft, { inputmode: 'numeric', placeholder: 'nepovinné' }),
       h('div', null, h('label', { class: 'field' }, h('span', { class: 'req' }, 'Objekt'),
         seg([[false, 'Stávající'], [true, 'Nový']], draft.novy_objekt, v => { draft.novy_objekt = v; rerender(); })))),
-    field('Vlastník (SVJ, BD, firma)', draft, 'subjekt', draft, { required: true })));
+    field('Vlastník (SVJ, BD, firma)', draft, 'subjekt', draft, { required: true }),
+    draft.novy_objekt === true ? novyPredlohaCard(draft, rerender) : null));
+  const npred = novyPred(draft);
 
   // Rozsah: jen části, které objekt má (podle dokumentů z exportu); ostatní schované jako „Netýká se“.
   const casti = src && Array.isArray(src.casti) && src.casti.length && draft.novy_objekt !== true ? src.casti : null;
@@ -832,8 +864,12 @@ function renderChecklist(draft) {
     deviceSections(shared, sSrc, redraw).forEach(node => app.append(node));
   }
 
+  // Nový objekt s předlohou správce: celý blok Kontroly PO (A, B, hydranty, C – seznam VPPO a PBZ, D)
+  if (draft.stavy.po === 'zmeny' && npred && npred.po) {
+    app.append(section(draft, 'po', 'A–D – Kontrola PO (nový objekt)', novyPoEditor(draft, npred, rerender), true));
+  }
   // A, C, D podle řádků Kontroly PO z exportu
-  if (draft.stavy.po === 'zmeny' && src && src.po) {
+  if (draft.stavy.po === 'zmeny' && src && src.po && !npred) {
     app.append(section(draft, 'po', 'A – Prohlídka PO (řádky protokolu)', poRows(draft, src.po, rerender), true));
     if (src.po.c !== null) {
       app.append(section(draft, 'po_c', 'C – Zjištěné skutečnosti, jiné závady', linesEditor(draft, 'po_c', src.po.c, 'po_c', rerender,
@@ -845,7 +881,7 @@ function renderChecklist(draft) {
     }
   }
   // A + D (objekt bez řádků Kontroly PO v exportu – zápis do D jako dříve)
-  if (draft.stavy.po === 'zmeny' && !(src && src.po)) {
+  if (draft.stavy.po === 'zmeny' && !(src && src.po) && !(npred && npred.po)) {
     app.append(section(draft, 'po', 'A – Prohlídka PO a D – ostatní', [
       h('label', { class: 'field' }, h('span', null, 'Minulé závady odstraněny'),
         seg([[true, 'Ano'], [false, 'Ne']], draft.po.minule, v => { draft.po.minule = v; rerender(); }, 'toggle')),
@@ -910,6 +946,459 @@ function renderChecklist(draft) {
     } }, 'Smazat checklist')));
   document.body.append(h('div', { class: 'fab' },
     h('button', { class: 'btn primary', type: 'button', onclick: () => showResult(draft, result) }, 'Zkontrolovat a uložit JSON')));
+}
+
+/* ------------------------------------------------------------------ nový objekt (etapa 5)
+   Stejný formulář jako na PC (qt_novy_objekt): řádky a sloupce z předlohy správce, kterou přibalí Export pro telefon
+   (seznam.novy_objekt). Kontrola PO vždy v jednotném tvaru (C – seznam VPPO a PBZ s P/N, D – zjištění a opatření).
+   Výsledek = checklist CL-A4-02 nového objektu (blok PO, evidence PHP, formulář hydrantů a PBZ); na PC se připojí
+   v Nové objekty › Připojit JSON a formulář Údaje zařízení se z něj předvyplní ke kontrole. */
+const NO_JINY = '– jiný popis (napiš níže) –';
+function novyData() { return (seznam && seznam.novy_objekt) || null; }
+function novyK() { return (novyData() || {}).konstanty || {}; }
+function novyPred(draft) {
+  if (draft.novy_objekt !== true) return null;
+  const list = (novyData() || {}).spravci || [];
+  return list.find(m => m.slozka === draft.predloha) || null;
+}
+function ensureNovy(draft) {
+  draft.nb = draft.nb || { a: {}, b: {}, b_auto: true, b_kontrola: 'P', h: {}, c: null, c_jine: { nazev: '', stav: 'P' }, d: '' };
+  draft.nh = draft.nh || { typ: '25D', proudnice: '10', p1: {}, vysledek: 'odpovídá', text: '', doporuceni: '' };
+  draft.npbz = draft.npbz || {};
+  draft.nno = draft.nno || [];
+  draft.nuc = draft.nuc || [];
+  return draft;
+}
+const isGood = text => (novyK().dobre || []).includes(norm(text));
+/* Nabídka řádku A (stejná jako na PC _volby_radku): [{text, volby, stav, kat}]; první = výchozí „bez závad“. */
+function novyVolbyA(row) {
+  const pairs = row.dvojice, good = pairs.map(([a, b]) => (isGood(b) ? 1 : 0));
+  const cat = (seznam.katalog || []).filter(i => i.k === 'po_a' && (!i.r || norm(i.r) === norm(row.nazev))).map(i => i.t);
+  const out = [];
+  if (row.text || pairs.length === 1) {
+    const bad = 1 - good[0];
+    out.push({ text: pairs[0][good[0]], volby: [good[0]], stav: '', kat: '' });
+    if (row.text) {
+      for (const t of cat) out.push({ text: `${pairs[0][bad]}: ${t}`, volby: [bad], stav: '', kat: t });
+      out.push({ text: `${pairs[0][bad]} ${NO_JINY}`, volby: [bad], stav: '', kat: null });
+    } else out.push({ text: pairs[0][bad], volby: [bad], stav: '', kat: '' });
+    for (const s of row.stavy || []) out.push({ text: s, volby: pairs.map(() => null), stav: s, kat: '' });
+    return out;
+  }
+  for (const c0 of [good[0], 1 - good[0]]) {
+    const o0 = pairs[0][c0];
+    if (['nejsou', 'neni'].includes(norm(o0))) { out.push({ text: o0, volby: [c0, ...pairs.slice(1).map(() => null)], stav: '', kat: '' }); continue; }
+    let combos = [[]];
+    pairs.slice(1).forEach((p, k) => { combos = combos.flatMap(c => [[...c, good[k + 1]], [...c, 1 - good[k + 1]]]); });
+    for (const c of combos) out.push({ text: [o0, ...c.map((x, k) => pairs[k + 1][x])].join(', '), volby: [c0, ...c], stav: '', kat: '' });
+  }
+  return out;
+}
+/* B – přenosné hasicí přístroje podle evidence (Strojovna výtahu / Sklepní prostory / Ostatní). */
+function novyBzEvidence(draft, places) {
+  const groups = Object.fromEntries(places.map(p => [p, []]));
+  const other = places.find(p => norm(p).startsWith('ostatn')) || places[places.length - 1];
+  const rules = [[['strojovn', 'vytah'], places.find(p => norm(p).includes('strojovn'))], [['sklep'], places.find(p => norm(p).includes('sklep'))]];
+  for (const r of draft.php.filter(x => x.akce === 'EVIDENCE')) {
+    if (!String(r.model || '').trim() && !String(r.umisteni || '').trim()) continue;
+    const where = norm(r.umisteni);
+    const target = (rules.find(([keys, p]) => p && keys.some(k => where.includes(k))) || [null, other])[1];
+    groups[target].push(String(r.model || '').trim());
+  }
+  return groups;
+}
+function novyFloors(draft) {
+  const floors = [];
+  for (const m of draft.hyd_mereni) for (const f of String(m.umisteni || '').match(/\d+\s*\.\s*(?:NP|PP)/gi) || []) floors.push(f.replace(/\s/g, '').toUpperCase());
+  return [...new Set(floors)].join(', ');
+}
+function novyC(draft) {
+  const K = novyK(), nb = draft.nb;
+  if (!nb.c) {   // výchozí: zařízení, která má objekt v rozsahu kontroly
+    nb.c = {};
+    for (const name of K.zarizeni_c || []) { const role = (K.zarizeni_c_klic || {})[name]; if (role && draft.stavy[role] === 'zmeny') nb.c[name] = 'P'; }
+  }
+  return nb.c;
+}
+function novyBlokPo(draft, pred, errors) {
+  const nb = draft.nb, po = pred.po, K = novyK();
+  const a = po.a.map(row => {
+    const opts = novyVolbyA(row), st = nb.a[row.nazev] || { i: 0, text: '' }, o = opts[st.i] || opts[0];
+    const out = { nazev: row.nazev, dvojice: row.dvojice, volby: [...o.volby], stav: o.stav, text: '', umisteni: '' };
+    if (row.umisteni) out.umisteni = String(st.text || '').trim();
+    else if (row.text && o.volby[0] !== null && !isGood(row.dvojice[0][o.volby[0]])) {
+      out.text = String(st.text || '').trim();
+      if (!out.text) errors.push(`A – ${row.nazev}: doplň popis závady.`);
+    }
+    return out;
+  });
+  const places = po.b.map(x => x.misto), auto = nb.b_auto && draft.stavy.php === 'zmeny', groups = auto ? novyBzEvidence(draft, places) : null;
+  const b = po.b.map(({ misto }) => {
+    const st = nb.b[misto] || { sel: 'NE', typ: '', k: 'P' };
+    let sel = st.sel, typ = st.typ, k = st.k;
+    if (auto && (sel === 'ANO' || sel === 'NE')) { sel = groups[misto].length ? 'ANO' : 'NE'; typ = [...new Set(groups[misto].filter(Boolean))].join(', '); k = 'P'; }
+    const yes = sel === 'ANO';
+    if (yes && !String(typ || '').trim()) errors.push(`B – ${misto}: doplň typ hasicího přístroje.`);
+    return { misto, ano: yes, typ: yes ? String(typ || '').trim() : '', stav: yes || sel === 'NE' ? '' : sel, kontrola: yes ? k : null };
+  });
+  let hh = null;
+  if (po.hydranty) {
+    const st = nb.h, yes = (st.ano ?? (draft.stavy.hydranty === 'zmeny')) === true;
+    const typ = st.typ || (['25D', '52C'].includes(draft.nh.typ) ? draft.nh.typ : '25D');
+    const kontrola = st.kontrola || 'provedena';
+    hh = { ano: yes, typ: yes && typ !== 'nevyplněno' ? typ : null, kontrola: yes && kontrola !== 'nevyplněno' ? kontrola : null,
+      podlazi: yes ? String(st.podlazi || novyFloors(draft)).trim() : '' };
+  }
+  const c = [];
+  if (po.c_seznam) {
+    const chosen = novyC(draft);
+    for (const name of Object.keys(chosen)) c.push({ nazev: name, stav: chosen[name] });
+    if (String(nb.c_jine.nazev || '').trim()) c.push({ nazev: nb.c_jine.nazev.trim(), stav: nb.c_jine.stav || 'P' });
+  }
+  const d = String(nb.d || '').split(/\s+/).filter(Boolean).join(' ');
+  const cText = c.map(i => `${i.nazev} (${i.stav})`).join(', ');
+  if (cText.length > (K.limit_c || 220) * 2 || d.length > (K.limit_d || 420) * 2) errors.push('Kontrola PO: text části C nebo D se nevejde na jednu stranu protokolu.');
+  return { a, b, b_kontrola: po.b.length ? (nb.b_kontrola || null) : null, h: hh, c, d };
+}
+const fmtNum = (v, d) => v.toFixed(d).replace('.', ',');
+const parseNum = t => {
+  const s = String(t ?? '').trim().replace(',', '.');
+  if (!s) return null;
+  if (!/^\d{1,3}(\.\d{1,4})?$/.test(s)) throw new Error('neplatné číslo „' + t + '“');
+  return Number(s);
+};
+function novyKHyd(draft, pred) {
+  const K = novyK();
+  return pred.hydranty.tabulka === 'A' ? K.k_typ[draft.nh.typ] : K.k_proudnice[draft.nh.proudnice];
+}
+/* Q = k·√p a dopočet chybějících hodnot (stejně jako hydranty_novy.dopocti). */
+function novyDopocti(tab, k, row) {
+  const out = { ...row };
+  if (tab === 'A') {
+    const p1 = parseNum(row.tlak_p1), q = parseNum(row.prutok);
+    let p2 = parseNum(row.tlak_p2);
+    if (p2 === null && q !== null) { p2 = Math.round((q / k) ** 2 * 100) / 100; out.tlak_p2 = fmtNum(p2, 2); }
+    if (q === null && p2 !== null) out.prutok = fmtNum(k * Math.sqrt(p2), 3);
+    if (p1 !== null && p2 !== null && !String(row.tlak_rozdil || '').trim()) out.tlak_rozdil = fmtNum(Math.max(p1 - p2, 0), 2);
+  } else {
+    const p = parseNum(row.tlak_vytok), q = parseNum(row.prutok);
+    if (p === null && q !== null) out.tlak_vytok = fmtNum((q / k) ** 2, 2);
+    if (q === null && p !== null) out.prutok = fmtNum(k * Math.sqrt(p), 2);
+  }
+  return out;
+}
+const HYD_KEYS = { A: ['tlak_p1', 'tlak_p2', 'tlak_rozdil', 'prutok'], B: ['tlak_vytok', 'prutok'] };
+const HYD_INPUT = { A: ['tlak_p1', 'tlak_p2', 'prutok'], B: ['tlak_vytok', 'prutok'] };
+const P1_HLAVNI = [['objekt', 'Objekt'], ['okres', 'Pracovní okres vodáren'], ['zdroj', 'Zdroj požární vody'], ['dn', 'DN rozvodu (nepovinné)'],
+  ['typ_d', 'Hydrant. systém typu D (např. D25, 30 m, pr. ekv. 10 mm)'], ['pocet_d', 'Počet D (prázdné = podle měření)'],
+  ['typ_c', 'Hydrant. systém typu C (např. C52)'], ['pocet_c', 'Počet C']];
+const P1_DALSI = [['suchovod', 'Požární potrubí (suchovod)'], ['pocet_suchovod', 'Počet suchovodů'], ['stanice', 'Tlaková zvyšovací stanice'],
+  ['nadzemni', 'Vnější – nadzemní hydrant'], ['pocet_nadzemni', 'Počet nadzemních'], ['podzemni', 'Vnější – podzemní hydrant'],
+  ['pocet_podzemni', 'Počet podzemních'], ['stanice_vnejsi', 'Vnější tlaková stanice'], ['dokumentace', 'Druh dokumentace'],
+  ['zpracovatel', 'Zpracovatel, datum zprac.'], ['uvedeni', 'Uvedení do provozu'], ['posledni_datum', 'Poslední kontrola (datum)'],
+  ['posledni_kdo', 'Poslední kontrolu provedl'], ['zavady_odstraneny', 'Závady z posl. kontroly odstraněny']];
+function novyP1Default(pred, key) {
+  const d = pred.hydranty.priloha1 || {};
+  return { objekt: d.objekt || 'Bytový dům', okres: d.okres || '', zdroj: d.zdroj || 'veřejný vodovodní řad', dokumentace: 'nezjištěno',
+    zpracovatel: 'nezjištěno', uvedeni: 'nezjištěno', rozvod: 'větvový' }[key] ?? '';
+}
+function novyP1Popis(draft, pred) {
+  const nh = draft.nh;
+  if (pred.hydranty.tabulka === 'B') return { typ_d: `D${nh.dn || '25'}, ${nh.hadice || '30'} m, pr. ekv. ${nh.proudnice} mm`, typ_c: '' };
+  return nh.typ === '25D' ? { typ_d: 'D25', typ_c: '' } : nh.typ === '52C' ? { typ_d: '', typ_c: 'C52' } : { typ_d: '', typ_c: '' };
+}
+function novyHydranty(draft, pred, errors) {
+  const nh = draft.nh, tab = pred.hydranty.tabulka, K = novyK(), k = novyKHyd(draft, pred), rows = [];
+  draft.hyd_mereni.forEach((m, i) => {
+    const inputs = HYD_INPUT[tab].map(x => m[x]);
+    if (!String(m.umisteni || '').trim() && !inputs.some(v => String(v || '').trim())) return;
+    let c;
+    try { c = novyDopocti(tab, k, Object.fromEntries(HYD_INPUT[tab].map(x => [x, m[x]]))); }
+    catch (e) { errors.push(`Hydrant ${i + 1}: ${e.message}.`); return; }
+    if (!String(m.umisteni || '').trim()) errors.push(`Hydrant ${i + 1}: chybí umístění.`);
+    if (!c.prutok) errors.push(`Hydrant ${i + 1}: chybí naměřená hodnota.`);
+    const row = { id: String(m.id || '').trim(), umisteni: String(m.umisteni || '').trim() };
+    for (const key of HYD_KEYS[tab]) if (c[key]) row[key] = c[key];
+    rows.push(row);
+  });
+  if (!rows.length) errors.push('Hydranty: zapiš aspoň jedno měření, nebo zvol Netýká se.');
+  const p1 = {};
+  for (const [key] of [...P1_HLAVNI, ...P1_DALSI]) {
+    const v = nh.p1[key] ?? novyP1Default(pred, key);
+    if (String(v).trim()) p1[key] = String(v).trim();
+  }
+  if (!String(nh.p1.typ_d || '').trim() && !String(nh.p1.typ_c || '').trim()) {   // popis systému podle typu (jako PC)
+    const auto = novyP1Popis(draft, pred);
+    for (const key of ['typ_d', 'typ_c']) { if (auto[key]) p1[key] = auto[key]; else delete p1[key]; }
+  }
+  const countKey = ['52C', '75B'].includes(nh.typ) && tab === 'A' ? 'pocet_c' : 'pocet_d';
+  if (!p1[countKey]) p1[countKey] = String(rows.length);
+  for (const key of ['pocet_d', 'pocet_c', 'pocet_suchovod', 'pocet_nadzemni', 'pocet_podzemni']) {
+    if (p1[key] && !/^\d{1,3}$/.test(p1[key])) errors.push(`Hydranty – Příloha 1: ${key.replace('pocet_', 'počet ')} musí být celé číslo.`);
+  }
+  const rozvod = nh.p1.rozvod ?? 'větvový';
+  p1.rozvod = rozvod === 'nevyplněno' ? '' : rozvod;
+  let lines, recs;
+  if (nh.vysledek === 'odpovídá') { lines = (K.text_odpovida || []).slice(0, pred.hydranty.text_radku); recs = [...(K.doporuceni || [])]; }
+  else {
+    lines = String(nh.text || '').split('\n').map(x => x.trim()).filter(Boolean);
+    recs = String(nh.doporuceni || (K.doporuceni || []).join('\n')).split('\n').map(x => x.trim()).filter(Boolean);
+    if (lines.length < 2) errors.push('Hydranty – Závěr: rozepiš závady (na řádky pod první řádek textu závěru).');
+  }
+  if (rows.length === 1) recs = recs.map(r => (r === (K.doporuceni || [])[0] ? K.doporuceni_1 : r));
+  if (lines.length > pred.hydranty.text_radku) errors.push(`Hydranty – Závěr: text má ${lines.length} řádků, předloha jich má ${pred.hydranty.text_radku}.`);
+  if (recs.length > pred.hydranty.doporuceni_max) errors.push(`Hydranty – Závěr: předloha má místo pro ${pred.hydranty.doporuceni_max} doporučení.`);
+  for (const t of [...lines, ...recs]) if (t.length > 115) errors.push(`Hydranty – Závěr: řádek je delší než 115 znaků: „${t.slice(0, 30)}…“`);
+  for (const [key, v] of Object.entries(p1)) if (v.length > 110) errors.push(`Hydranty – Příloha 1: ${key} je delší než 110 znaků.`);
+  return { rows, form: { typ: nh.typ, tabulka: tab, proudnice: tab === 'B' ? String(nh.proudnice) : '', priloha1: p1,
+    zaver: { vysledek: nh.vysledek, text: lines, doporuceni: recs } } };
+}
+function novyPbzLabels(pred, role) { return ((pred.pbz[role] || {}).sloupce || []).filter(Boolean); }
+function novyPbz(draft, pred, errors) {
+  const forms = {}, K = novyK();
+  let lights = null, seals = null;
+  for (const role of PBZ) {
+    if (draft.stavy[role] !== 'zmeny' || !pred.pbz[role]) continue;
+    const st = draft.npbz[role] || { radky: [], vysledek: 'bez', zavady: '' }, labels = novyPbzLabels(pred, role), name = ROLE_NAME[role];
+    const rows = (st.radky || []).map(r => labels.map((_, i) => String(r[i] || '').trim()))
+      .filter(r => r.some((v, i) => v && labels[i] !== 'Č.'))
+      .map((r, n) => r.map((v, i) => (labels[i] === 'Č.' && !v ? String(n + 1) : v)));
+    const defects = st.vysledek === 'zavady' ? String(st.zavady || '').split(/\s+/).filter(Boolean).join(' ') : '';
+    if (st.vysledek === 'zavady' && !defects) errors.push(`${name}: doplň zjištěné závady, nebo zvol „bez závad“.`);
+    if (defects.length > 480) errors.push(`${name}: text závad je delší než 480 znaků.`);
+    if (rows.length > (K.pbz_max_radku || 60)) errors.push(`${name}: příliš mnoho řádků evidence.`);
+    forms[role] = { sloupce: labels, radky: rows, zavady: defects };
+    if (role === 'nouzove_osvetleni') {
+      lights = [];
+      draft.nno.forEach((r, i) => {
+        if (!String(r.umisteni || '').trim() && !String(r.typ || '').trim()) return;
+        const pocet = String(r.pocet || '1').trim();
+        if (!/^\d{1,3}$/.test(pocet) || Number(pocet) < 1) { errors.push(`Seznam NO řádek ${i + 1}: počet musí být kladné celé číslo.`); return; }
+        if (!String(r.umisteni || '').trim() || !String(r.stav || '').trim()) errors.push(`Seznam NO řádek ${i + 1}: chybí umístění nebo stav.`);
+        lights.push({ umisteni: String(r.umisteni || '').trim(), typ: String(r.typ || '').trim(), stav: String(r.stav || '').trim(), pocet: Number(pocet) });
+      });
+      if (lights.length > (K.no_radku || 10)) errors.push(`Seznam NO: předloha má ${K.no_radku || 10} řádků.`);
+      if (!lights.length) lights = null;
+    }
+    if (role === 'ucpavky') {
+      seals = [];
+      draft.nuc.forEach((r, i) => {
+        if (!(K.uc_sloupce || []).some(([k]) => !['stav', 'pocet'].includes(k) && String(r[k] || '').trim())) return;
+        const pocet = String(r.pocet || '1').trim();
+        if (!/^\d{1,3}$/.test(pocet) || Number(pocet) < 1) { errors.push(`Seznam ucpávek řádek ${i + 1}: počet musí být kladné celé číslo.`); return; }
+        const item = {};
+        for (const [k] of K.uc_sloupce || []) item[k] = k === 'pocet' ? Number(pocet) : String(r[k] || '').trim();
+        if (!item.umisteni || !item.stav) errors.push(`Seznam ucpávek řádek ${i + 1}: chybí umístění nebo stav.`);
+        seals.push(item);
+      });
+      if (seals.length > (K.uc_radku || 30)) errors.push(`Seznam ucpávek: nejvýše ${K.uc_radku || 30} řádků.`);
+      if (!seals.length) seals = null;
+    }
+  }
+  return { forms, lights, seals };
+}
+/* Části checklistu nového objektu podle předlohy (pro build i validate). */
+function novyParts(draft) {
+  const pred = novyPred(draft);
+  if (!pred) return null;
+  ensureNovy(draft);
+  const errors = [], obj = {};
+  if (draft.stavy.po === 'zmeny') {
+    if (!pred.po) errors.push('Kontrola PO: předloha správce chybí – na PC udělej nový Export pro telefon.');
+    else obj.blok = novyBlokPo(draft, pred, errors);
+  }
+  if (draft.stavy.hydranty === 'zmeny' && pred.hydranty) {
+    const hyd = novyHydranty(draft, pred, errors);
+    obj.hydranty_mereni = hyd.rows; obj.hydranty_formular = hyd.form;
+  }
+  const pbz = novyPbz(draft, pred, errors);
+  if (Object.keys(pbz.forms).length) obj.pbz_formular = pbz.forms;
+  if (pbz.lights) obj.no_seznam_novy = pbz.lights;
+  if (pbz.seals) obj.ucpavky_seznam_novy = pbz.seals;
+  return { pred, obj, errors };
+}
+
+/* --- obrazovky formuláře nového objektu --- */
+function selectField(label, options, value, onChange, opts = {}) {
+  return h('label', { class: 'field' }, h('span', { class: opts.required ? 'req' : null }, label),
+    h('select', { onchange: e => onChange(e.target.value) }, options.map(o => {
+      const [v, t] = Array.isArray(o) ? o : [o, o];
+      return h('option', { value: v, selected: String(v) === String(value) }, t);
+    })));
+}
+function novyPredlohaCard(draft, rerender) {
+  const data = novyData();
+  if (!data || !(data.spravci || []).length) {
+    return h('p', { class: 'muted' }, 'Formulář nového objektu potřebuje předlohy správců – na PC udělej nový Lhůtník › Export pro telefon a pak Synchronizovat.');
+  }
+  return [selectField('Správce (předloha protokolů)', [['', '— vyber správce —'], ...data.spravci.map(m => [m.slozka, m.sada])], draft.predloha || '',
+    v => { draft.predloha = v; touch(draft); rerender(); }, { required: true }),
+  h('p', { class: 'muted', style: 'margin:0' }, 'Řádky formuláře odpovídají posledním protokolům správce. Výchozí stav je „bez závad“, měníš jen odchylky.')];
+}
+function novyPoEditor(draft, pred, rerender) {
+  const nb = ensureNovy(draft).nb, po = pred.po, K = novyK(), out = [];
+  out.push(h('div', { style: 'font-weight:650;margin:2px 0' }, 'A – prohlídka společných prostor'));
+  for (const row of po.a) {
+    const opts = novyVolbyA(row), st = nb.a[row.nazev] = nb.a[row.nazev] || { i: 0, text: '' }, o = opts[st.i] || opts[0];
+    const bad = o.volby[0] !== null && !isGood(row.dvojice[0][o.volby[0]]);
+    out.push(h('div', { class: 'item' + (st.i ? ' picked' : '') }, h('div', { class: 'item-head' }, row.nazev),
+      h('select', { onchange: e => {
+        st.i = Number(e.target.value);
+        if (row.text && !row.umisteni) st.text = opts[st.i].kat || '';
+        touch(draft); rerender();
+      } }, opts.map((x, i) => h('option', { value: i, selected: i === st.i }, x.text))),
+      row.umisteni ? field('Umístění (např. ve sklepě, na fasádě)', st, 'text', draft) : null,
+      row.text && !row.umisteni && bad ? field('Popis závady', st, 'text', draft, { required: true, multiline: true }) : null));
+  }
+  if (po.b.length) {
+    out.push(h('div', { style: 'font-weight:650;margin:12px 0 2px' }, 'B – přenosné hasicí přístroje'));
+    out.push(h('label', { class: 'row nowrap', style: 'gap:8px' },
+      h('input', { type: 'checkbox', checked: nb.b_auto, onchange: e => { nb.b_auto = e.target.checked; touch(draft); rerender(); } }),
+      h('span', null, 'Vyplnit podle evidence hasicích přístrojů (část B níže)')));
+    const groups = nb.b_auto && draft.stavy.php === 'zmeny' ? novyBzEvidence(draft, po.b.map(x => x.misto)) : null;
+    for (const { misto, stavy } of po.b) {
+      const st = nb.b[misto] = nb.b[misto] || { sel: 'NE', typ: '', k: 'P' };
+      const autoTyp = groups ? [...new Set(groups[misto].filter(Boolean))].join(', ') : null;
+      const shownSel = groups && ['ANO', 'NE'].includes(st.sel) ? (groups[misto].length ? 'ANO' : 'NE') : st.sel;
+      out.push(h('div', { class: 'item' }, h('div', { class: 'item-head' }, misto),
+        selectField('Stav', ['NE', 'ANO', ...stavy], shownSel, v => { st.sel = v; touch(draft); rerender(); }),
+        groups && ['ANO', 'NE'].includes(st.sel)
+          ? h('p', { class: 'muted', style: 'margin:0' }, autoTyp ? `Typ podle evidence: ${autoTyp}` : 'V evidenci tu žádný přístroj není.')
+          : st.sel === 'ANO' ? [field('Typ PHP', st, 'typ', draft, { required: true }),
+            selectField('Kontrola', [['P', '(P) provedena'], ['N', '(N) neprovedena']], st.k, v => { st.k = v; touch(draft); })] : null));
+    }
+    out.push(selectField('Kontrola PHP', [['P', 'provedena (P)'], ['N', 'neprovedena (N)'], ['', 'nevyplněno']], nb.b_kontrola || '',
+      v => { nb.b_kontrola = v || null; touch(draft); }));
+  }
+  if (po.hydranty) {
+    const st = nb.h, yes = (st.ano ?? (draft.stavy.hydranty === 'zmeny')) === true;
+    out.push(h('div', { style: 'font-weight:650;margin:12px 0 2px' }, 'Vnitřní hydrantový systém'));
+    out.push(selectField('Systém', ['NE', 'ANO'], yes ? 'ANO' : 'NE', v => { st.ano = v === 'ANO'; touch(draft); rerender(); }));
+    if (yes) {
+      out.push(h('div', { class: 'grid2' },
+        selectField('Typ', ['25D', '52C', 'nevyplněno'], st.typ || (['25D', '52C'].includes(draft.nh.typ) ? draft.nh.typ : '25D'), v => { st.typ = v; touch(draft); }),
+        selectField('Kontrola roční', ['provedena', 'neprovedena', 'nevyplněno'], st.kontrola || 'provedena', v => { st.kontrola = v; touch(draft); })),
+      field(`Podlaží (prázdné = z měření: ${novyFloors(draft) || '—'})`, st, 'podlazi', draft));
+    }
+  }
+  if (po.c_seznam) {
+    const chosen = novyC(draft);
+    out.push(h('div', { style: 'font-weight:650;margin:12px 0 2px' }, 'C – Další instalované VPPO a PBZ (P – provedeno; N – neprovedeno)'));
+    for (const name of K.zarizeni_c || []) {
+      const on = name in chosen;
+      out.push(h('div', { class: 'row nowrap', style: 'gap:8px;margin:4px 0' },
+        h('label', { class: 'row nowrap grow', style: 'gap:8px' }, h('input', { type: 'checkbox', checked: on, onchange: e => {
+          if (e.target.checked) chosen[name] = 'P'; else delete chosen[name];
+          touch(draft); rerender();
+        } }), h('span', null, name)),
+        on ? seg([['P', 'P'], ['N', 'N']], chosen[name], v => { chosen[name] = v; touch(draft); rerender(); }) : null));
+    }
+    out.push(h('div', { class: 'grid2' }, field('Jiné zařízení (název)', nb.c_jine, 'nazev', draft),
+      selectField('Stav', ['P', 'N'], nb.c_jine.stav || 'P', v => { nb.c_jine.stav = v; touch(draft); })));
+  }
+  out.push(h('div', { style: 'font-weight:650;margin:12px 0 2px' }, 'D – Zjištěné skutečnosti, jiné závady, navržená opatření, stanovení způsobu a termínů jejich splnění'));
+  const counter = h('span', { class: 'muted' });
+  const updateCount = () => {
+    const n = String(nb.d || '').split(/\s+/).filter(Boolean).join(' ').length, lim = K.limit_d || 420;
+    counter.textContent = `${n} / ${lim} znaků` + (n > lim ? ' – delší text se nemusí vejít na stranu' : '');
+  };
+  out.push(h('label', { class: 'field' }, h('textarea', { value: nb.d || '', oninput: e => { nb.d = e.target.value; touch(draft); updateCount(); } })));
+  out.push(h('div', { class: 'row' }, catalogBtn('po_d', '', t => { nb.d = [String(nb.d || '').trim(), t].filter(Boolean).join(' '); touch(draft); rerender(); }), counter));
+  updateCount();
+  return out;
+}
+function novyHydEditor(draft, pred, rerender) {
+  const nh = ensureNovy(draft).nh, tab = pred.hydranty.tabulka, K = novyK(), out = [];
+  let k = null;
+  try { k = novyKHyd(draft, pred); } catch (e) { /* neúplná volba */ }
+  out.push(h('p', { class: 'muted' }, `Tabulka ${tab} podle předlohy správce (${tab === 'A' ? 'p1, p2, p1−p2, Q' : 'tlak na výtoku, Q'}). `
+    + 'Tlaky v MPa, průtok v l/s; chybějící hodnotu program dopočítá (Q = k·√p).'));
+  out.push(h('div', { class: 'grid2' }, selectField('Typ hydrantu', ['25D', '52C', '75B'], nh.typ, v => { nh.typ = v; touch(draft); rerender(); }),
+    tab === 'B' ? selectField('Proudnice (mm)', Object.keys(K.k_proudnice || {}), nh.proudnice, v => { nh.proudnice = v; touch(draft); rerender(); }) : h('div')));
+  if (tab === 'B') out.push(h('div', { class: 'grid2' }, selectField('Systém DN', ['25', '19', '33'], nh.dn || '25', v => { nh.dn = v; touch(draft); rerender(); }),
+    selectField('Hadice (m)', ['30', '20'], nh.hadice || '30', v => { nh.hadice = v; touch(draft); rerender(); })));
+  draft.hyd_mereni.forEach((m, i) => {
+    let shown = '';
+    try {
+      if (k) {
+        const c = novyDopocti(tab, k, Object.fromEntries(HYD_INPUT[tab].map(x => [x, m[x]])));
+        shown = HYD_KEYS[tab].filter(x => c[x]).map(x => `${MEASURE_NAME[x].split(' (')[0]} ${c[x]}`).join(' · ');
+        const q = parseNum(c.prutok), min = ((K.minimum || {})[nh.typ] || [0, 0])[1];
+        if (q !== null && q < min) shown += ' – POD MINIMEM';
+      }
+    } catch (e) { shown = e.message; }
+    out.push(h('div', { class: 'item' }, h('div', { class: 'item-head' }, `Hydrant ${i + 1}`, removeBtn(() => { draft.hyd_mereni.splice(i, 1); touch(draft); rerender(); })),
+      h('div', { class: 'grid2' }, field('Číslo', m, 'id', draft), field('Umístění (např. 2.NP chodba)', m, 'umisteni', draft, { required: true })),
+      h('div', { class: 'grid2' }, HYD_INPUT[tab].map(x => field(MEASURE_NAME[x], m, x, draft, { inputmode: 'decimal' }))),
+      shown ? h('p', { class: 'muted', style: 'margin:2px 0' }, shown) : null));
+  });
+  out.push(h('button', { class: 'btn', type: 'button', onclick: () => {
+    draft.hyd_mereni.push({ id: String(draft.hyd_mereni.length + 1), umisteni: '', tlak_vytok: '', tlak_p1: '', tlak_p2: '', tlak_rozdil: '', prutok: '' });
+    touch(draft); rerender();
+  } }, '+ Hydrant'));
+  const p1 = nh.p1;
+  for (const [key] of [...P1_HLAVNI, ...P1_DALSI]) if (p1[key] === undefined) p1[key] = novyP1Default(pred, key);
+  out.push(h('div', { style: 'font-weight:650;margin:12px 0 2px' }, 'Příloha 1'));
+  const auto = novyP1Popis(draft, pred);
+  out.push(h('p', { class: 'muted', style: 'margin:0' }, `Typ systému se při prázdných polích doplní sám: ${auto.typ_d || auto.typ_c || '—'}.`));
+  out.push(P1_HLAVNI.map(([key, label]) => field(label, p1, key, draft, key.startsWith('pocet') ? { inputmode: 'numeric' } : {})));
+  out.push(selectField('Druh rozvodu', [...(K.rozvody || []), 'nevyplněno'], p1.rozvod ?? 'větvový', v => { p1.rozvod = v; touch(draft); }));
+  out.push(h('details', null, h('summary', { class: 'muted' }, 'Další údaje Přílohy 1'),
+    P1_DALSI.map(([key, label]) => field(label, p1, key, draft, key.startsWith('pocet') ? { inputmode: 'numeric' } : {}))));
+  out.push(h('div', { style: 'font-weight:650;margin:12px 0 2px' }, 'Závěr'));
+  out.push(selectField('Zařízení … kontrolované v rozsahu příloh', K.vysledky || [], nh.vysledek, v => {
+    nh.vysledek = v;
+    if (v !== 'odpovídá' && !String(nh.text || '').trim()) nh.text = (K.text_odpovida || [''])[0] + '\n';
+    touch(draft); rerender();
+  }));
+  if (nh.vysledek === 'odpovídá') out.push(h('p', { class: 'muted' }, 'Bez závad: zapíše se obvyklý text závěru a obvyklá doporučení.'));
+  else {
+    out.push(field(`Text závěru – první řádek navazuje na výrok, na dalších rozepiš závady (předloha má ${pred.hydranty.text_radku} řádků)`, nh, 'text', draft, { multiline: true }));
+    if (!nh.doporuceni) nh.doporuceni = (K.doporuceni || []).join('\n');
+    out.push(field(`Doporučení – jedno na řádek (místo pro ${pred.hydranty.doporuceni_max})`, nh, 'doporuceni', draft, { multiline: true }));
+    out.push(h('div', { class: 'row' }, catalogBtn('hydranty', '', t => { nh.doporuceni = [String(nh.doporuceni || '').trim(), t].filter(Boolean).join('\n'); touch(draft); rerender(); })));
+  }
+  return out;
+}
+function novyListEditor(draft, rows, cols, stavy, limit, empty, rerender, title) {
+  const out = [h('div', { style: 'font-weight:650;margin:12px 0 2px' }, title)];
+  rows.forEach((r, i) => out.push(h('div', { class: 'item' },
+    h('div', { class: 'item-head' }, `Řádek ${i + 1}`, removeBtn(() => { rows.splice(i, 1); touch(draft); rerender(); })),
+    cols.map(([k, name]) => (k === 'stav'
+      ? selectField(name, ['', ...stavy], r[k] || '', v => { r[k] = v; touch(draft); }, { required: true })
+      : field(name, r, k, draft, k === 'pocet' ? { inputmode: 'numeric', placeholder: '1' } : {}))))));
+  if (rows.length < limit) out.push(h('div', { class: 'row' },
+    h('button', { class: 'btn', type: 'button', onclick: () => { rows.push({ ...empty }); touch(draft); rerender(); } }, '+ Řádek'),
+    rows.length ? h('button', { class: 'btn', type: 'button', onclick: () => { rows.push({ ...rows[rows.length - 1] }); touch(draft); rerender(); } }, 'Kopírovat poslední') : null));
+  return out;
+}
+function novyPbzEditor(draft, pred, role, rerender) {
+  const K = novyK(), p = pred.pbz[role], labels = novyPbzLabels(pred, role);
+  ensureNovy(draft);
+  const st = draft.npbz[role] = draft.npbz[role] || { radky: [], vysledek: 'bez', zavady: '' };
+  const out = [];
+  if (p.chyba) out.push(h('p', { class: 'muted' }, p.chyba));
+  if (labels.length) {
+    out.push(h('p', { class: 'muted' }, `Evidence podle předlohy (${p.radku_predlohy} ${p.radku_predlohy === 1 ? 'řádek' : 'řádků'}; další se přidají). Prázdné řádky se nezapíší.`));
+    st.radky.forEach((r, i) => out.push(h('div', { class: 'item' },
+      h('div', { class: 'item-head' }, `Řádek ${i + 1}`, removeBtn(() => { st.radky.splice(i, 1); touch(draft); rerender(); })),
+      labels.map((name, c) => h('label', { class: 'field' }, h('span', null, name === 'Č.' ? 'Č. (prázdné = pořadí)' : name),
+        h('input', { value: r[c] || '', oninput: e => { r[c] = e.target.value; touch(draft); } }))))));
+    out.push(h('div', { class: 'row' },
+      h('button', { class: 'btn', type: 'button', onclick: () => { st.radky.push(labels.map(() => '')); touch(draft); rerender(); } }, '+ Řádek evidence'),
+      st.radky.length ? h('button', { class: 'btn', type: 'button', onclick: () => { st.radky.push([...st.radky[st.radky.length - 1]]); touch(draft); rerender(); } }, 'Kopírovat poslední') : null));
+  }
+  if (role === 'nouzove_osvetleni') out.push(novyListEditor(draft, draft.nno, K.no_sloupce || [], K.no_stavy || [], K.no_radku || 10,
+    { umisteni: '', typ: '', stav: 'vyhovuje', pocet: '1' }, rerender, `Seznam nouzového osvětlení (nový list NO, nejvýše ${K.no_radku || 10} řádků)`));
+  if (role === 'ucpavky') out.push(novyListEditor(draft, draft.nuc, K.uc_sloupce || [], K.uc_stavy || [], K.uc_radku || 30,
+    { cislo: '', umisteni: '', druh: '', pocet: '1', odolnost: '', typ: '', system: '', stav: 'vyhovuje' }, rerender,
+    `Seznam ucpávek (nejvýše ${K.uc_radku || 30} řádků; „č.“ = označení ucpávky na místě)`));
+  out.push(selectField('Výsledek kontroly', [['bez', 'bez závad'], ['zavady', 'se závadami']], st.vysledek, v => { st.vysledek = v; touch(draft); rerender(); }));
+  if (st.vysledek === 'zavady') {
+    out.push(field('Zjištěné závady (zapíší se za „Zjištěno:“)', st, 'zavady', draft, { required: true, multiline: true }));
+    if (role === 'nouzove_osvetleni') out.push(catalogBtn('no', '', t => { st.zavady = [String(st.zavady || '').trim(), t].filter(Boolean).join(' '); touch(draft); rerender(); }));
+  } else out.push(h('p', { class: 'muted' }, 'Bez závad: „' + (K.vysledek_ok || '') + '“'));
+  return out;
 }
 
 /* ------------------------------------------------------------------ katalog závad */
@@ -1124,11 +1613,15 @@ function showResult(draft, box) {
       h('p', { class: 'muted' }, auto
         ? (done ? 'Na PC ho najdeš v Pracovní dávce pod tlačítkem „Z telefonu“.'
           : od.connected() ? 'Odesílá se do OneDrive automaticky – bez signálu počká a odejde sám, jakmile bude síť.'
-            : 'Odešle se automaticky po přihlášení k OneDrive (O aplikaci › Přihlásit).')
-        : 'Ulož ho do OneDrive › Revize_telefon › checklisty (nebo propoj aplikaci s OneDrive v O aplikaci – pak se checklisty odesílají samy).'),
-      h('div', { class: 'row' },
-        h('button', { class: 'btn grow' + (auto ? '' : ' primary'), type: 'button', onclick: () => shareJson(files) }, 'Uložit / sdílet'),
-        h('button', { class: 'btn', type: 'button', onclick: () => files.forEach(downloadJson) }, 'Stáhnout')),
+            : 'Odešle se automaticky po přihlášení k OneDrive.')
+        : 'Aby se checklisty odesílaly do OneDrive samy (bez ukládání a stahování), propoj jednou aplikaci s OneDrive.'),
+      auto && od.connected() ? null : h('div', { class: 'row' }, h('button', { class: 'btn primary grow', type: 'button',
+        onclick: () => { location.hash = '#/o-aplikaci'; } }, auto ? 'Přihlásit k OneDrive' : 'Nastavit automatické odesílání')),
+      // Ruční uložení jen jako záloha – při propojení s OneDrive není potřeba.
+      h(auto ? 'details' : 'div', { style: 'margin-top:8px' }, auto ? h('summary', { class: 'muted' }, 'Uložit ručně') : null,
+        h('div', { class: 'row' },
+          h('button', { class: 'btn grow', type: 'button', onclick: () => shareJson(files) }, 'Uložit / sdílet'),
+          h('button', { class: 'btn', type: 'button', onclick: () => files.forEach(downloadJson) }, 'Stáhnout'))),
       h('details', { style: 'margin-top:10px' }, h('summary', { class: 'muted' }, 'Zobrazit JSON'), files.map(f => h('pre', null, f.json)))));
   };
   render();
